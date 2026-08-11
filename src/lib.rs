@@ -2,6 +2,7 @@ pub mod config;
 pub mod context;
 pub mod detect;
 pub mod error;
+pub mod exec;
 pub mod lockfile;
 pub mod preflight;
 pub mod run;
