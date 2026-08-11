@@ -1320,6 +1320,7 @@ mod tests {
         let guard = acquire(&repo).unwrap();
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(lock_path(&repo))
             .unwrap();
@@ -1329,6 +1330,7 @@ mod tests {
 
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(lock_path(&repo))
             .unwrap();
@@ -1374,7 +1376,13 @@ pub fn acquire(repo_root: &Path) -> Result<RepoLock, Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let open = || OpenOptions::new().create(true).write(true).open(&path);
+    let open = || {
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+    };
     match Flock::lock(open()?, FlockArg::LockExclusiveNonblock) {
         Ok(lock) => Ok(RepoLock(lock)),
         Err((_, nix::errno::Errno::EWOULDBLOCK)) => {
