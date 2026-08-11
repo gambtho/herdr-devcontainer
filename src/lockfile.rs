@@ -8,23 +8,33 @@ use crate::error::Error;
 
 pub struct RepoLock(#[allow(dead_code)] Flock<File>);
 
-pub fn lock_path(repo_root: &Path) -> PathBuf {
+pub fn lock_path(repo_root: &Path) -> Result<PathBuf, Error> {
     use std::os::unix::ffi::OsStrExt;
     let digest = Sha256::digest(repo_root.as_os_str().as_bytes());
-    state_dir().join("locks").join(format!("{digest:x}.lock"))
+    Ok(state_dir()?.join("locks").join(format!("{digest:x}.lock")))
 }
 
-fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
+/// An empty base would put the lock at a *relative* path, so two panes started
+/// from different directories would take two different locks and bring-up would
+/// silently stop being serialized. Fail loudly instead.
+fn state_dir() -> Result<PathBuf, Error> {
+    let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".local/state"))
         })
-        .join("herdr-devcontainer")
+        .ok_or_else(|| {
+            Error::Other(
+                "neither XDG_STATE_HOME nor HOME is set; cannot place the lock file".into(),
+            )
+        })?;
+    Ok(base.join("herdr-devcontainer"))
 }
 
 pub fn acquire(repo_root: &Path) -> Result<RepoLock, Error> {
-    let path = lock_path(repo_root);
+    let path = lock_path(repo_root)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -55,12 +65,13 @@ mod tests {
 
     #[test]
     fn lock_paths_are_stable_and_distinct() {
-        let a1 = lock_path(Path::new("/repo/a"));
-        let a2 = lock_path(Path::new("/repo/a"));
-        let b = lock_path(Path::new("/repo/b"));
+        let a1 = lock_path(Path::new("/repo/a")).unwrap();
+        let a2 = lock_path(Path::new("/repo/a")).unwrap();
+        let b = lock_path(Path::new("/repo/b")).unwrap();
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
         assert!(a1.to_string_lossy().ends_with(".lock"));
+        assert!(a1.is_absolute(), "lock path must not be relative: {a1:?}");
     }
 
     #[test]
@@ -75,7 +86,7 @@ mod tests {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(lock_path(&repo))
+            .open(lock_path(&repo).unwrap())
             .unwrap();
         let second = Flock::lock(file, FlockArg::LockExclusiveNonblock);
         assert!(second.is_err(), "second flock should be excluded");
@@ -85,7 +96,7 @@ mod tests {
             .create(true)
             .truncate(false)
             .write(true)
-            .open(lock_path(&repo))
+            .open(lock_path(&repo).unwrap())
             .unwrap();
         assert!(Flock::lock(file, FlockArg::LockExclusiveNonblock).is_ok());
     }

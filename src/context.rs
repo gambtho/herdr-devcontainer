@@ -26,6 +26,13 @@ pub fn load_context() -> PluginContext {
 
 pub fn resolve_repo_root(ctx: &PluginContext, process_cwd: &Path) -> Result<PathBuf, Error> {
     if let Some(root) = ctx.worktree.as_ref().and_then(|w| w.repo_root.as_deref()) {
+        // Normalize through git like the cwd path below: container identity is
+        // keyed on the *main* worktree, and herdr's `repo_root` is not
+        // guaranteed to be one. A non-git path still falls back to its own
+        // canonical form rather than being discarded.
+        if let Some(main) = main_worktree_root(Path::new(root)) {
+            return Ok(main);
+        }
         if let Ok(canon) = Path::new(root).canonicalize() {
             return Ok(canon);
         }
@@ -139,6 +146,29 @@ mod tests {
         );
         let ctx = PluginContext {
             focused_pane_cwd: Some(linked.display().to_string()),
+            ..Default::default()
+        };
+        let root = resolve_repo_root(&ctx, Path::new("/")).unwrap();
+        assert_eq!(root, main.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_linked_worktree_in_repo_root_still_resolves_to_the_main_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        make_repo(&main);
+        let linked = tmp.path().join("linked");
+        git(
+            &main,
+            &["worktree", "add", linked.to_str().unwrap(), "-b", "wt2"],
+        );
+        // All worktrees of a repo must share one container, so a linked path
+        // arriving via herdr's context must normalize the same way a cwd does.
+        let ctx = PluginContext {
+            worktree: Some(WorktreeContext {
+                repo_root: Some(linked.display().to_string()),
+            }),
             ..Default::default()
         };
         let root = resolve_repo_root(&ctx, Path::new("/")).unwrap();

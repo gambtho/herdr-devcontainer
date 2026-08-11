@@ -27,7 +27,7 @@ pub enum Error {
     UpOutputUnparseable { detail: String, last_line: String },
     #[error("could not parse `docker ps` output line: {line}")]
     MalformedDockerOutput { line: String },
-    #[error("multiple running dev containers carry label devcontainer.local_folder={repo_root}; refusing to choose")]
+    #[error("multiple running dev containers carry label devcontainer.local_folder={repo_root}; refusing to choose: {ids:?}")]
     MultipleRunningContainers { repo_root: String, ids: Vec<String> },
     #[error("docker command failed: {detail}")]
     DockerCommandFailed { detail: String },
@@ -131,6 +131,19 @@ mod tests {
         .to_string();
         assert!(msg.contains("300"));
         assert!(msg.contains("still resolving features"));
+    }
+
+    // The hint says "stop the extras with `docker stop <id>`", which is only
+    // actionable if the ids are actually on screen.
+    #[test]
+    fn multiple_running_containers_render_their_ids() {
+        let msg = Error::MultipleRunningContainers {
+            repo_root: "/r".into(),
+            ids: vec!["abc123 (foo_devcontainer)".into(), "def456 (bar)".into()],
+        }
+        .to_string();
+        assert!(msg.contains("abc123 (foo_devcontainer)"), "{msg}");
+        assert!(msg.contains("def456 (bar)"), "{msg}");
     }
 
     #[test]
