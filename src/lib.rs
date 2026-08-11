@@ -7,3 +7,4 @@ pub mod preflight;
 pub mod run;
 pub mod up;
 pub mod util;
+pub mod workdir;
