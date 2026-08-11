@@ -1,0 +1,24 @@
+[package]
+name = "herdr-devcontainer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+
+[lib]
+name = "herdr_devcontainer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "herdr-devc"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "1"
+nix = { version = "0.29", features = ["fs", "signal"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
