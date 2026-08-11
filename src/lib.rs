@@ -5,6 +5,8 @@ pub mod discover;
 pub mod error;
 pub mod exec;
 pub mod lockfile;
+pub mod open;
+pub mod pane;
 pub mod preflight;
 pub mod run;
 pub mod up;

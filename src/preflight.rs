@@ -6,13 +6,14 @@ use crate::run::{run, StderrMode};
 use crate::util::tail;
 
 pub fn find_devcontainer(path_var: &str) -> Result<PathBuf, Error> {
-    for dir in std::env::split_paths(path_var) {
-        let candidate = dir.join("devcontainer");
-        if is_executable(&candidate) {
-            return Ok(candidate);
-        }
-    }
-    Err(Error::DevcontainerCliMissing)
+    find_in_path(path_var, "devcontainer").ok_or(Error::DevcontainerCliMissing)
+}
+
+/// First executable named `name` on `path_var`, or `None`.
+pub fn find_in_path(path_var: &str, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_var)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
 }
 
 fn is_executable(path: &Path) -> bool {
