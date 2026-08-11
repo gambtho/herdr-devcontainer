@@ -1,6 +1,7 @@
 pub mod config;
 pub mod context;
 pub mod detect;
+pub mod discover;
 pub mod error;
 pub mod exec;
 pub mod lockfile;
