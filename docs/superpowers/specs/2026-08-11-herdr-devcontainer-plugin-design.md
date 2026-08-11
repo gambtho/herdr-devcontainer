@@ -347,18 +347,38 @@ captured tail is stdout only, and the error's rendered message must include it.
 
 - herdr plugin API is ~2 months old and moving; 0.8.x already broke 0.7.x
   installs once. Pin `min_herdr_version`, expect maintenance.
-- Split-pane close-on-exit behavior **still unverified** — it needs a live herdr
-  TUI session, which implementation-time verification could not drive. The
-  hold-on-error mitigation is implemented and works (`herdr-devc pane` in a repo
-  without a devcontainer prints the classified error and waits for Enter), so
-  the risk is covered either way; simplify only if panes are later observed to
-  persist after exit.
+- Split-pane close-on-exit behavior is **verified** (manual check 1, 2026-08-11):
+  the hold-on-error path keeps the pane open long enough to read a classified
+  error. The mitigation stays; no simplification warranted.
 - `HERDR_BIN_PATH` injection on the *action* path remains unverified, and no
   herdr source checkout was available to settle it. Resolved by making the
   variable a preference rather than a requirement: `open::resolve_herdr_bin`
   takes `HERDR_BIN_PATH` when set and non-empty, and otherwise falls back to a
   PATH lookup for `herdr`, so the action path works whether or not herdr injects
   it. No `${...}` expansion is relied on in the manifest.
+- **`HERDR_BIN_PATH` can be actively wrong, not merely absent** (found in live
+  testing, fixed in `72e998c`). herdr fills it from its own `/proc/self/exe`, so
+  upgrading the herdr binary while the server keeps running leaves the literal
+  value `/home/u/.local/bin/herdr (deleted)`. Exec'ing that dies with a bare
+  `ENOENT` naming nothing actionable. The variable is therefore validated with
+  `preflight::is_executable` and an unusable value yields to the PATH lookup —
+  deliberately not by stripping the `" (deleted)"` suffix, which would treat the
+  symptom. Any future consumer of a herdr-injected path variable should assume
+  the same staleness.
+- **herdr does not detect keybinding collisions.** `herdr config check` returned
+  `config: ok` for a `[[keys.command]]` binding that duplicated a built-in
+  default (`prefix+shift+d` = `close_workspace`), and the collision then
+  silently shadowed the built-in — observed live, closing a workspace instead of
+  opening the plugin pane. Anyone documenting a suggested binding for this
+  plugin must diff it against herdr's built-in table by hand
+  (`strings $(command -v herdr) | grep -E '^# [a-z_]+ = "prefix\+'`); the
+  config checker will not catch it.
+- **Stop is confirmed, not immediate** (manual check 3). See the amendment under
+  `herdr-devc stop`: the original "explicit invocation is guard enough"
+  assumption failed against a keybinding one shifted key from `close_workspace`.
+  The cost is that `herdr-devc stop` no longer works non-interactively; add an
+  explicit opt-out flag if a scripted caller ever needs one, rather than
+  weakening the default.
 - Manifest syntax is now **verified against a real herdr 0.8.0**: `herdr plugin
   link` accepts `herdr-plugin.toml` and echoes back every field, and `herdr
   plugin action list` reports all three actions with `platforms` inherited from
