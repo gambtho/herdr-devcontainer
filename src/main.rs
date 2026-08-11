@@ -6,8 +6,11 @@ fn main() {
     let result: Result<(), Error> = match args.first().map(String::as_str) {
         Some("pane") => pane::run_pane(args.iter().any(|a| a == "--shell")),
         Some("stop") => {
-            eprintln!("stop: not implemented yet");
-            std::process::exit(2);
+            let result = herdr_devcontainer::stop::run_stop();
+            if result.is_ok() {
+                hold();
+            }
+            result
         }
         Some("open") => open::run_open(args.get(1).map(String::as_str)),
         _ => {

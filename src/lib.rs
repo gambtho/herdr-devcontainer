@@ -9,6 +9,7 @@ pub mod open;
 pub mod pane;
 pub mod preflight;
 pub mod run;
+pub mod stop;
 pub mod up;
 pub mod util;
 pub mod workdir;
