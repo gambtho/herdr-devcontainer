@@ -277,7 +277,7 @@ impl Error {
                 "add a devcontainer.json, or set enabled = \"true\" for this repo in ~/.config/herdr-devcontainer/config.toml",
             ),
             Error::InvalidConfigPath { .. } => Some(
-                "`config` is resolved against the repo root; use a path like .devcontainer/alt/devcontainer.json",
+                "`config` must be relative to the repo root; use a path like .devcontainer/alt/devcontainer.json",
             ),
             Error::ConfigUnreadable { .. } => {
                 Some("fix the file's permissions, or remove it to fall back to defaults")
