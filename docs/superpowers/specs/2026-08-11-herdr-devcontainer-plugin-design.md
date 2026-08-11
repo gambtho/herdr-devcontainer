@@ -330,13 +330,26 @@ captured tail is stdout only, and the error's rendered message must include it.
 
 - herdr plugin API is ~2 months old and moving; 0.8.x already broke 0.7.x
   installs once. Pin `min_herdr_version`, expect maintenance.
-- Split-pane close-on-exit behavior unverified — mitigated by hold-on-error;
-  verify during implementation and simplify if panes persist after exit.
-- Manifest `${HERDR_BIN_PATH}` expansion in action commands unverified, **and so
-  is the `HERDR_BIN_PATH` env injection the designed fallback depends on** — the
-  verified evidence is pane-path only. Resolve both before Task 12 (see Shape).
-- Exact manifest field names/syntax must be transcribed from herdr docs (and
-  herdr-plus as a working example) at implementation time.
+- Split-pane close-on-exit behavior **still unverified** — it needs a live herdr
+  TUI session, which implementation-time verification could not drive. The
+  hold-on-error mitigation is implemented and works (`herdr-devc pane` in a repo
+  without a devcontainer prints the classified error and waits for Enter), so
+  the risk is covered either way; simplify only if panes are later observed to
+  persist after exit.
+- `HERDR_BIN_PATH` injection on the *action* path remains unverified, and no
+  herdr source checkout was available to settle it. Resolved by making the
+  variable a preference rather than a requirement: `open::resolve_herdr_bin`
+  takes `HERDR_BIN_PATH` when set and non-empty, and otherwise falls back to a
+  PATH lookup for `herdr`, so the action path works whether or not herdr injects
+  it. No `${...}` expansion is relied on in the manifest.
+- Manifest syntax is now **verified against a real herdr 0.8.0**: `herdr plugin
+  link` accepts `herdr-plugin.toml` and echoes back every field, and `herdr
+  plugin action list` reports all three actions with `platforms` inherited from
+  the top level. Placement values are validated by herdr as an enum — `overlay`,
+  `popup`, `split`, `tab`, `zoomed` — so the `popup` used by the stop pane is
+  valid at manifest level even though `herdr plugin pane open --placement` omits
+  it. The re-invocation argv in `open::open_argv` matches the real CLI:
+  `herdr plugin pane open --plugin <id> --entrypoint <id>`.
 
 ## Alternatives considered
 
