@@ -128,7 +128,11 @@ needed is recorded here. Facts below were verified against herdr master
    never auto-triggered from `[[events]]` hooks. Hard rule.
 6. **Double-start protection:** `devcontainer up` idempotency + a per-repo flock
    held across bring-up. No state DB; rediscovery via the
-   `devcontainer.local_folder` label.
+   `devcontainer.local_folder` label. The label query runs on **both** paths —
+   before bring-up in the pane flow (to refuse an ambiguous repo, per decision 3)
+   and in `stop` to pick the container to kill. Leaving it out of the pane flow
+   would let `devcontainer up` silently attach to one of several running matches,
+   which is exactly the case ProjectMux refuses.
 7. **Pane payload:** two variants sharing one wrapper — `shell` (login shell)
    and `command` (configured command, default `claude`).
 8. **Placement:** `split` by default (stop is a `popup`).
@@ -179,6 +183,15 @@ Verify at implementation time whether manifest commands expand
 subcommand (`herdr-devc open shell`) that reads `HERDR_BIN_PATH` from env and
 execs the CLI.
 
+**The fallback rests on an unverified assumption**: the env-injection evidence
+above (`src/app/api/plugins/panes.rs:232-264`) covers `[[panes]]` commands, and
+actions are a different spawn path. If herdr does not inject `HERDR_BIN_PATH`
+for `[[actions]]` either, both the primary and the fallback fail and every
+keybinding is dead on arrival. Verify the action path specifically — read the
+action spawn code and confirm with a live keybinding — **before** building the
+fallback around it. If neither path supplies the variable, resolve the herdr
+binary another way (PATH lookup for `herdr`, or a configured path).
+
 ### Wrapper flow (`herdr-devc pane [--shell]`)
 
 Runs inside the newly created pane; bring-up progress is naturally visible.
@@ -188,48 +201,66 @@ Runs inside the newly created pane; bring-up progress is naturally visible.
    b. else derive from `focused_pane_cwd`: `git rev-parse --git-common-dir`,
       main root = parent of the common dir (handle `.git` dirname);
    c. else `workspace_cwd` (same git derivation);
-   d. else fail with guidance ("open a pane in a git repo first").
+   d. else the wrapper's own process cwd (same git derivation) — herdr sets the
+      pane cwd from the focused pane, so this is a meaningful last resort when
+      the context JSON is absent entirely;
+   e. else fail with guidance ("open a pane in a git repo first").
    Canonicalize the result.
 2. **Detection:** per-repo config `enabled = "auto" | "true" | "false"`
    (default auto). Auto stats the configured path or the two standard
    locations; not-exist continues, other stat errors are reported as errors.
    `false` prints "disabled for this repo" and holds. `true` skips the stat and
    lets `devcontainer up` fail on its own if config is missing.
+   A configured `config` path must be **repo-relative**: reject absolute paths
+   and any `..` component rather than joining them onto the repo root, since
+   `Path::join` silently discards the root for an absolute argument.
 3. **Preflight:** `devcontainer` on PATH; docker reachable (`docker version
    --format '{{.Server.Version}}'`, require exit 0 AND non-empty stdout). Each
    failure produces a one-line fix hint (install command / start daemon).
-4. **Lock:** flock on
+4. **Ambiguity check:** `docker ps -a --filter
+   label=devcontainer.local_folder=<repo-root>`; if more than one match is
+   *running*, list them and fail — never let `devcontainer up` choose. Zero or
+   one running match proceeds (bring-up is idempotent and reattaches). Malformed
+   `docker ps` output is an error, not absence.
+5. **Lock:** flock on
    `$XDG_STATE_HOME/herdr-devcontainer/locks/<sha256-of-canonical-repo-root>.lock`
    (default `~/.local/state/...`), taken blocking with a "waiting for another
-   bring-up" note, held only across step 5.
-5. **Bring-up:** `devcontainer up --workspace-folder <repo-root>
+   bring-up" note, held only across step 6.
+6. **Bring-up:** `devcontainer up --workspace-folder <repo-root>
    [--config <repo-root>/<config-path>]`. stderr inherited (streams to the
    pane), stdout captured (bounded). Timeout `up_timeout_secs` (default 300);
    child in its own process group; on timeout kill the group and report with
    captured tail. Parse last stdout line as JSON; validate as in ProjectMux
    (outcome/containerId/remoteWorkspaceFolder; remoteUser optional).
-6. **Workdir mapping:** invocation cwd (the pane's cwd, which herdr sets from
+7. **Workdir mapping:** invocation cwd (the pane's cwd, which herdr sets from
    the focused pane) relative to repo root, POSIX-joined onto
    `remoteWorkspaceFolder`. If cwd is not under the repo root (worktree outside
    the repo, e.g. a sibling checkout), use `remoteWorkspaceFolder` itself and
    print a one-line notice — that content is not mounted in the container.
-7. **Exec:** replace the wrapper process (`CommandExt::exec`) with
+8. **Exec:** replace the wrapper process (`CommandExt::exec`) with
    `docker exec -i -t [-u <remoteUser>] -w <workdir> <containerId> sh -l`
    (shell variant) or `... sh -lc <command>` (command variant, command from
    config, default `claude`). Host side is direct argv — no host shell, no
    quoting layer; only the container side goes through `sh -lc`.
-8. **Any failure:** print classified error + hint, wait for Enter (so the
+9. **Any failure:** print classified error + hint, wait for Enter (so the
    message survives regardless of herdr's close-on-exit behavior), exit
-   non-zero.
+   non-zero. Errors that carry captured output (`up` failure, `up` timeout) must
+   **print that tail**, not merely store it — an exit code with no diagnostics is
+   the failure mode this step exists to prevent.
 
 ### `herdr-devc stop`
 
 Popup pane. Resolve repo root (same chain), then
-`docker ps --filter label=devcontainer.local_folder=<repo-root>` →
+`docker ps -a --filter label=devcontainer.local_folder=<repo-root>` with a
+format that captures **id, name, and state** (the spec's "print its id/name"
+requires the name be queried, not just the id) →
 - no container: say so;
 - one running: print its id/name, `docker stop` with 30s timeout, report;
 - more than one running: list them and refuse to choose (same rule as
   ProjectMux).
+Malformed `docker ps` lines are a hard error, never silently dropped: discarding
+an unparseable line turns "I could not tell" into "there is no container", which
+violates the uncertainty-is-never-absence rule above.
 "No such container" on stop counts as success (already gone). Hold for Enter
 before exiting so the popup doesn't vanish with the output.
 
@@ -247,23 +278,42 @@ config = ".devcontainer/alt/devcontainer.json"   # repo-relative
 Missing file = all defaults. Unknown keys are warnings, not errors. Repo keys
 are matched against the canonicalized repo root.
 
+A read failure is **not** the same as a missing file: `NotFound` yields defaults,
+while a permission or I/O error is reported as an error. Collapsing the two would
+let an unreadable config silently re-enable a repo the user set to
+`enabled = "false"`.
+
+`config` values are repo-relative by contract — reject absolute paths and any
+`..` component (see wrapper flow step 2).
+
 ### Error classification
 
 Distinct, specifically-worded failures for: not a git repo; devcontainer CLI
-missing; docker daemon unreachable; no devcontainer config (auto mode);
-disabled by config; `up` timeout; `up` failed (exit code + stderr tail);
-`up` output unparseable; multiple running containers. Case-insensitive matching
-on docker error strings.
+missing; docker daemon unreachable; config unreadable; no devcontainer config
+(auto mode); invalid repo-relative config path; disabled by config; `up` timeout;
+`up` failed; `up` output unparseable; malformed `docker ps` output; multiple
+running containers. Case-insensitive matching on docker error strings.
+
+`up` failure and `up` timeout carry a captured **stdout** tail. stderr is
+inherited so the CLI's progress and error text stream live into the pane; the
+captured tail is stdout only, and the error's rendered message must include it.
 
 ### Testing
 
 - Unit tests (pure logic, no docker): context JSON parsing and the repo
   fallback chain; up-output parsing (success, garbage, empty, progress on
   stdout, missing fields); workdir mapping incl. worktree outside root; config
-  parsing incl. unknown keys; docker/devcontainer argv construction with
-  hostile paths (spaces, quotes).
+  parsing incl. unknown keys, unreadable file, and rejected non-relative
+  `config` paths; `docker ps` parsing incl. malformed lines and multiple running
+  matches; docker/devcontainer argv construction with hostile paths (spaces,
+  quotes).
 - Integration tests behind `#[ignore]`: require real docker + devcontainer CLI,
-  run manually against a fixture repo with a minimal devcontainer.json.
+  run manually against a fixture repo with a minimal devcontainer.json. These
+  cover `bring_up` and `exec` at the library level and do **not** stand in for
+  end-to-end coverage of the pane flow — `run_pane` composes context resolution,
+  config, detection, the ambiguity check, locking, and hold-on-error, none of
+  which the library-level test touches. Cover that composition with its own
+  test that drives the built binary, and verify the manifest wiring by hand.
 
 ## Security notes
 
@@ -282,8 +332,9 @@ on docker error strings.
   installs once. Pin `min_herdr_version`, expect maintenance.
 - Split-pane close-on-exit behavior unverified — mitigated by hold-on-error;
   verify during implementation and simplify if panes persist after exit.
-- Manifest `${HERDR_BIN_PATH}` expansion in action commands unverified — has a
-  designed fallback (see Shape).
+- Manifest `${HERDR_BIN_PATH}` expansion in action commands unverified, **and so
+  is the `HERDR_BIN_PATH` env injection the designed fallback depends on** — the
+  verified evidence is pane-path only. Resolve both before Task 12 (see Shape).
 - Exact manifest field names/syntax must be transcribed from herdr docs (and
   herdr-plus as a working example) at implementation time.
 
