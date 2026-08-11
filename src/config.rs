@@ -62,7 +62,7 @@ impl Config {
 }
 
 pub fn load() -> Result<Config, Error> {
-    load_from(&config_path())
+    load_from(&config_path()?)
 }
 
 pub fn load_from(path: &Path) -> Result<Config, Error> {
@@ -94,13 +94,35 @@ pub fn resolve_repo_relative(repo_root: &Path, rel: &str) -> Result<PathBuf, Err
     Ok(repo_root.join(candidate))
 }
 
-fn config_path() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+fn config_path() -> Result<PathBuf, Error> {
+    config_path_from(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// With no home base the path would be *relative*, and a relative path that
+/// fails to resolve is indistinguishable from a missing file — which falls back
+/// to defaults and silently re-enables a repo the user set to
+/// `enabled = "false"`. That is the same hazard `load_from` refuses on the read
+/// side, so refuse it on the path side too.
+fn config_path_from(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, Error> {
+    let base = xdg
+        .filter(|x| !x.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
-    base.join("herdr-devcontainer").join("config.toml")
+        .or_else(|| {
+            home.filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+        .ok_or_else(|| {
+            Error::Other(
+                "neither XDG_CONFIG_HOME nor HOME is set; cannot locate the config file".into(),
+            )
+        })?;
+    Ok(base.join("herdr-devcontainer").join("config.toml"))
 }
 
 pub fn parse(text: &str) -> Config {
@@ -265,5 +287,39 @@ mod tests {
     fn parent_traversal_is_rejected() {
         let err = resolve_repo_relative(Path::new("/r"), "../other/devcontainer.json").unwrap_err();
         assert!(matches!(err, Error::InvalidConfigPath { .. }));
+    }
+
+    // With no home base the path goes *relative*, and a relative path that fails
+    // to resolve is indistinguishable from "no config file" — which would
+    // silently re-enable a repo the user set to enabled = "false". That is the
+    // exact hazard `unreadable_file_is_an_error_not_a_default` guards against on
+    // the read side, so the path side has to fail loudly too.
+    #[test]
+    fn no_home_base_is_an_error_not_a_relative_path() {
+        let err = config_path_from(None, None).unwrap_err();
+        assert!(matches!(err, Error::Other(_)), "{err:?}");
+    }
+
+    #[test]
+    fn empty_env_vars_count_as_unset() {
+        assert!(config_path_from(Some("".into()), Some("".into())).is_err());
+        // An empty XDG_CONFIG_HOME must fall through to HOME, not win with "".
+        let got = config_path_from(Some("".into()), Some("/home/u".into())).unwrap();
+        assert_eq!(
+            got,
+            Path::new("/home/u/.config/herdr-devcontainer/config.toml")
+        );
+    }
+
+    #[test]
+    fn either_base_yields_an_absolute_path() {
+        let x = config_path_from(Some("/x/cfg".into()), None).unwrap();
+        assert_eq!(x, Path::new("/x/cfg/herdr-devcontainer/config.toml"));
+        let h = config_path_from(None, Some("/home/u".into())).unwrap();
+        assert_eq!(
+            h,
+            Path::new("/home/u/.config/herdr-devcontainer/config.toml")
+        );
+        assert!(x.is_absolute() && h.is_absolute());
     }
 }
