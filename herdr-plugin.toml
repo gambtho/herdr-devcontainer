@@ -1,0 +1,45 @@
+id = "devcontainer"
+name = "Dev Container"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Open herdr panes inside the repository's Dev Container."
+platforms = ["linux"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[panes]]
+id = "shell"
+title = "Container Shell"
+placement = "split"
+command = ["./target/release/herdr-devc", "pane", "--shell"]
+
+[[panes]]
+id = "command"
+title = "Container Agent"
+placement = "split"
+command = ["./target/release/herdr-devc", "pane"]
+
+[[panes]]
+id = "stop"
+title = "Stop Dev Container"
+placement = "popup"
+command = ["./target/release/herdr-devc", "stop"]
+
+[[actions]]
+id = "open-shell"
+title = "Open Dev Container Shell"
+contexts = ["workspace"]
+command = ["./target/release/herdr-devc", "open", "shell"]
+
+[[actions]]
+id = "open-command"
+title = "Open Dev Container Agent"
+contexts = ["workspace"]
+command = ["./target/release/herdr-devc", "open", "command"]
+
+[[actions]]
+id = "open-stop"
+title = "Stop Dev Container"
+contexts = ["workspace"]
+command = ["./target/release/herdr-devc", "open", "stop"]
