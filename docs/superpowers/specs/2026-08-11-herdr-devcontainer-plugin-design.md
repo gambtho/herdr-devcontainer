@@ -123,7 +123,8 @@ needed is recorded here. Facts below were verified against herdr master
    more subprocess plumbing than Go, no design impact.
 3. **Container identity:** repo-root scoped, exactly as ProjectMux.
 4. **Lifecycle:** up + exec only, plus an explicit stop entrypoint. Never
-   automatic stop, never `docker rm`.
+   automatic stop, never `docker rm`. Stop confirms before acting — see the
+   amendment under `herdr-devc stop`.
 5. **Trigger discipline:** explicit invocation only (pane entrypoints/actions);
    never auto-triggered from `[[events]]` hooks. Hard rule.
 6. **Double-start protection:** `devcontainer up` idempotency + a per-repo flock
@@ -255,7 +256,8 @@ Popup pane. Resolve repo root (same chain), then
 format that captures **id, name, and state** (the spec's "print its id/name"
 requires the name be queried, not just the id) →
 - no container: say so;
-- one running: print its id/name, `docker stop` with 30s timeout, report;
+- one running: print its id/name, **confirm**, then `docker stop` with 30s
+  timeout, report;
 - more than one running: list them and refuse to choose (same rule as
   ProjectMux).
 Malformed `docker ps` lines are a hard error, never silently dropped: discarding
@@ -263,6 +265,21 @@ an unparseable line turns "I could not tell" into "there is no container", which
 violates the uncertainty-is-never-absence rule above.
 "No such container" on stop counts as success (already gone). Hold for Enter
 before exiting so the popup doesn't vanish with the output.
+
+**Amendment (2026-08-11, after manual verification).** The original design had
+stop act immediately, treating decision 5's "explicit invocation only" as
+sufficient guard. Manual check 3 showed that guard is weaker than assumed: the
+stop keybinding lives one shifted key from herdr's built-in `close_workspace`
+(`prefix+shift+d`), which was mis-keyed in testing and closed a workspace, and a
+mis-keyed stop is indistinguishable from an intended one while discarding a
+running container's state with no undo. Stop therefore prompts
+`stop container <id> (<name>) for <root>? [y/N]:` and proceeds only on an
+explicit `y`/`yes`. A bare Enter, an unrecognized answer, and an unreadable one
+(EOF — closed stdin, non-interactive invocation) all cancel and leave the
+container running; this is the uncertainty-is-never-absence rule applied to
+consent. The consequence to accept: `herdr-devc stop` is no longer usable
+non-interactively without a future opt-out flag, which is the correct default
+for a destructive operation with no undo.
 
 ### Config — `~/.config/herdr-devcontainer/config.toml`
 
