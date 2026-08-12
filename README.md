@@ -59,15 +59,21 @@ cannot drift away from what actually compiles.
 
 ## Install
 
-From GitHub:
+Install the latest reviewed release:
+
+```sh
+herdr plugin install gambtho/herdr-devcontainer --ref v0.1.0
+```
+
+Herdr clones the tagged source and runs the manifest's `cargo build --release`
+hook before registering the plugin. Pass `--yes` to skip the confirmation
+prompt.
+
+To follow current development on `main` instead — which is not a release:
 
 ```sh
 herdr plugin install gambtho/herdr-devcontainer
 ```
-
-Herdr clones the repository and runs the manifest's build hook before
-registering the plugin; pass `--yes` to skip the confirmation prompt, or
-`--ref <tag-or-sha>` to pin a revision.
 
 Verify what got registered:
 
