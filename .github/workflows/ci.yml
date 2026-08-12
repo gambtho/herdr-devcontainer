@@ -54,6 +54,51 @@ jobs:
       - name: Release build
         run: cargo build --release --locked
 
+  # Evidence gathering, not a platform claim. The manifest still declares
+  # platforms = ["linux"], and nothing here exercises Docker or the Dev
+  # Containers CLI on macOS -- the container path remains unverified there.
+  #
+  # What this does establish: the crate contains nothing Linux-specific. It uses
+  # flock, killpg, exec, and the Unix permission and OsStr extensions, all of
+  # which exist on macOS, and the 88 unit tests are hermetic enough to run
+  # anywhere. If this job stays green, widening `platforms` becomes a decision
+  # backed by real runs on real hardware rather than by a successful
+  # cross-compile check.
+  #
+  # Deliberately not a required status check: an unproven platform must not be
+  # able to block a merge.
+  macos:
+    name: macOS build and unit tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version --verbose && cargo --version
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-stable-
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
   # The declared minimum is only meaningful if something checks it. The lockfile
   # is deliberately resolved against this version rather than against the newest
   # publications, so this job is what stops a routine `cargo update` from
