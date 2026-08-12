@@ -399,3 +399,56 @@ captured tail is stdout only, and the error's rendered message must include it.
   verification), leaves the host shell as the pane's parent process.
 - **Go for the wrapper**: equivalent functionally; Rust chosen to match the
   herdr ecosystem at a modest plumbing cost.
+
+## Amendments (2026-08-12, after first real use)
+
+Two assumptions above were wrong in production. Both are corrected in the
+implementation; the steps they belong to are left as originally written so the
+reasoning stays readable.
+
+**Step 7 (workdir mapping) — the pane's cwd is not the wrapper's cwd.** Steps
+1d and 7 assume "herdr sets the pane cwd from the focused pane." It does not:
+herdr spawns a plugin pane with the *plugin root* as its working directory,
+which it must, since manifest commands are plugin-relative
+(`./target/release/herdr-devc`). herdr's own `plugin log` confirms it — an
+`open-shell` invocation reports `"cwd":
+"/home/…/.config/herdr/plugins/github/devcontainer-…"`. Reading
+`current_dir()` therefore made `strip_prefix(repo_root)` fail on *every* launch,
+so every pane printed the out-of-repo notice and started at the workspace root,
+and subdirectory panes silently lost their location. The mapping cwd now comes
+from the invocation context (`focused_pane_cwd`, then `workspace_cwd`), with
+the process cwd kept only as the context-less last resort.
+
+**Step 8 (exec) — `sh -lc` cannot see the environment the container sets up.**
+`sh` is not the container user's shell, and a login-but-not-interactive shell
+does not source `~/.zshrc` or `~/.bashrc`, which is where Dev Container setup
+scripts put `PATH` entries and API endpoints. The observed failure: an agent
+launched into a container whose setup script points it at a local model proxy
+ignored the proxy entirely. The wrapper now probes the container user's login
+shell from passwd (refusing `nologin`/`false`, and printing a note when it must
+fall back to `sh`) and runs it interactively: `-lic` / `-li`, except for bash,
+which gets `-ic` / `-i`.
+
+The bash exception is empirical, not cosmetic. The Dev Containers CLI maps its
+default `userEnvProbe: loginInteractiveShell` to `-lic`, so `-lic` was the
+obvious choice — but bash reads `~/.bashrc` only when interactive and *not* a
+login shell, so `-l` suppresses it. Verified in
+`mcr.microsoft.com/devcontainers/base:alpine`, whose `vscode` user has a
+`~/.bashrc` and no profile file: with a marker exported from `~/.bashrc`,
+`bash -lic` prints nothing and `bash -ic` prints the marker, while
+`zsh -lic` prints its own marker and `zsh -lc` does not. Every shell other than
+bash reads its rc file regardless of login status, so those keep `-l` and the
+`/etc/profile` values it brings.
+
+The payload is *not* wrapped in `exec`: shells already replace themselves when
+`-c` holds a single simple command, and the wrapper would break any other
+payload shape (`exec source env.sh && claude` fails with "exec: source: not
+found").
+
+The `[-e K=V ...]` in step 8's exec line is now fed by a per-repo `env` setting
+rather than by `remoteEnv`. Resolving `remoteEnv` correctly would mean merging
+devcontainer.json with every Feature's metadata and the image's
+`devcontainer.metadata` label — `devcontainer up` does not report the merged
+result — so parsing the config file alone was rejected as producing a partial
+environment that reads as authoritative. That is the same "uncertainty is never
+absence" rule this design applies elsewhere.

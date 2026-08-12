@@ -17,6 +17,13 @@ pub enum Enabled {
 pub struct RepoConfig {
     pub enabled: Enabled,
     pub config: Option<String>,
+    /// Overrides the login shell probed from the container's passwd database.
+    pub shell: Option<String>,
+    /// `K=V` assignments passed straight to `docker exec -e`. This is the
+    /// escape hatch for env that a repository expresses only in
+    /// devcontainer.json's `remoteEnv`, which a plain `docker exec` does not
+    /// apply and which this plugin deliberately does not parse.
+    pub env: Vec<String>,
 }
 
 impl Default for RepoConfig {
@@ -24,6 +31,8 @@ impl Default for RepoConfig {
         RepoConfig {
             enabled: Enabled::Auto,
             config: None,
+            shell: None,
+            env: Vec::new(),
         }
     }
 }
@@ -186,12 +195,51 @@ fn parse_repos(value: toml::Value, cfg: &mut Config) {
                         .warnings
                         .push(format!("repos.\"{root}\".config must be a string")),
                 },
+                "shell" => match val.as_str() {
+                    Some(s) if !s.trim().is_empty() => rc.shell = Some(s.trim().to_string()),
+                    _ => cfg
+                        .warnings
+                        .push(format!("repos.\"{root}\".shell must be a non-empty string")),
+                },
+                "env" => parse_repo_env(root, val, &mut rc, cfg),
                 other => cfg
                     .warnings
                     .push(format!("unknown key repos.\"{root}\".{other} ignored")),
             }
         }
         cfg.repos.insert(PathBuf::from(root), rc);
+    }
+}
+
+/// `env` entries reach `docker exec -e` verbatim, so a malformed one is
+/// dropped with a warning rather than passed on: `-e` with no `=` tells docker
+/// to *forward the host's* variable of that name, which would silently leak
+/// host environment into the container instead of setting what was asked for.
+///
+/// A key with whitespace in it is refused for the same reason. Docker accepts
+/// `-e " FOO=bar"` and duly creates a variable named `" FOO"` — one no shell
+/// can ever reference, so a stray leading space from a copy-paste would produce
+/// a config that looks applied and does nothing.
+fn parse_repo_env(root: &str, value: &toml::Value, rc: &mut RepoConfig, cfg: &mut Config) {
+    let Some(items) = value.as_array() else {
+        cfg.warnings.push(format!(
+            "repos.\"{root}\".env must be an array of \"K=V\" strings"
+        ));
+        return;
+    };
+    for item in items {
+        match item.as_str() {
+            Some(s)
+                if s.split_once('=').is_some_and(|(k, _)| {
+                    !k.is_empty() && !k.contains(char::is_whitespace)
+                }) =>
+            {
+                rc.env.push(s.to_string());
+            }
+            _ => cfg.warnings.push(format!(
+                "repos.\"{root}\".env entry {item} ignored; expected \"KEY=value\" with no spaces in KEY"
+            )),
+        }
     }
 }
 
@@ -232,6 +280,46 @@ mod tests {
         let rc = cfg.repo(Path::new("/x/repo"));
         assert_eq!(rc.enabled, Enabled::False);
         assert_eq!(rc.config.as_deref(), Some(".devcontainer/alt.json"));
+    }
+
+    #[test]
+    fn repo_shell_and_env_parse() {
+        let cfg = parse(
+            r#"
+            [repos."/x/repo"]
+            shell = "/bin/zsh"
+            env = ["FOO=bar", "EMPTY="]
+            "#,
+        );
+        let rc = cfg.repo(Path::new("/x/repo"));
+        assert_eq!(rc.shell.as_deref(), Some("/bin/zsh"));
+        assert_eq!(rc.env, vec!["FOO=bar".to_string(), "EMPTY=".to_string()]);
+        assert!(cfg.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_blank_repo_shell_warns_and_stays_unset() {
+        let cfg = parse("[repos.\"/x/repo\"]\nshell = \"   \"\n");
+        assert!(cfg.repo(Path::new("/x/repo")).shell.is_none());
+        assert_eq!(cfg.warnings.len(), 1);
+    }
+
+    #[test]
+    fn env_entries_without_a_usable_key_are_dropped_not_forwarded() {
+        // Bare `-e NAME` makes docker forward the *host* variable, and a key
+        // with a space in it names a variable no shell can reference.
+        let cfg =
+            parse("[repos.\"/x/repo\"]\nenv = [\"HOME\", \"=novalue\", \" LEAD=1\", \"OK=1\"]\n");
+        let rc = cfg.repo(Path::new("/x/repo"));
+        assert_eq!(rc.env, vec!["OK=1".to_string()]);
+        assert_eq!(cfg.warnings.len(), 3);
+    }
+
+    #[test]
+    fn env_that_is_not_an_array_warns() {
+        let cfg = parse("[repos.\"/x/repo\"]\nenv = \"FOO=bar\"\n");
+        assert!(cfg.repo(Path::new("/x/repo")).env.is_empty());
+        assert_eq!(cfg.warnings.len(), 1);
     }
 
     #[test]
