@@ -261,7 +261,10 @@ bash gets `-i`/`-ic` and every other known shell gets `-li`/`-lic`.
 fish are each verified to accept those combined flags. A shell outside that list
 is driven with bare `-c` instead, because not every shell takes them —
 `tcsh -lic` fails with "Unknown option", which would produce a pane that never
-opens.
+opens. That fallback is the one case where a command pane is **not** interactive
+and no startup file is guaranteed: an unknown shell is run plainly and left to
+its own rc conventions. Name it in `shell` and it is used as given, but the flag
+rules above still apply to it by basename.
 
 Set `shell` for a repository to override the probe.
 
@@ -276,9 +279,12 @@ What this does **not** do is apply `remoteEnv` from `devcontainer.json`. That
 value is a merge of the config file, every Feature's contributed metadata, and
 the image's `devcontainer.metadata` label, and `devcontainer up` does not report
 the resolved result — so parsing the config file alone would produce a partial
-environment that looks authoritative. In practice the pane's shell already
-supplies what `remoteEnv` sets, because the same setup scripts write both. When
-it does not, list the assignments explicitly in `env`.
+environment that looks authoritative. A pane's environment therefore comes from
+three places only: what the image itself sets, what the shell's startup files
+add, and what you list in `env`. Often the shell covers what `remoteEnv` would
+have, because the same setup scripts write both — but that is a coincidence of
+how a repository is built, not a guarantee. Anything you actually depend on
+belongs in `env`.
 
 ## How it works
 

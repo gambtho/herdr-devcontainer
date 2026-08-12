@@ -197,6 +197,13 @@ binary another way (PATH lookup for `herdr`, or a configured path).
 
 Runs inside the newly created pane; bring-up progress is naturally visible.
 
+> **Steps 1d, 7, and 8 were amended after first real use.** They are left below
+> as originally written, because the reasoning is worth reading, but the pane
+> cwd and exec behavior they describe are superseded — see
+> [Amendments](#amendments-2026-08-12-after-first-real-use) at the end of this
+> document, and the README for the settings (`shell`, `env`) that came with
+> them.
+
 1. **Resolve repo root** (fallback chain):
    a. `worktree.repo_root` from `HERDR_PLUGIN_CONTEXT_JSON`;
    b. else derive from `focused_pane_cwd`: `git rev-parse --git-common-dir`,
