@@ -1,32 +1,85 @@
-# herdr-devcontainer
+# herdr-devcontainer — Dev Container panes for Herdr
 
-A [herdr](https://herdr.dev) plugin that opens panes **inside the repository's
-Dev Container** instead of on the host. Point it at a repo that carries a
-`.devcontainer/devcontainer.json`, and the plugin brings the container up (via
-the official Dev Containers CLI), maps your current directory to the matching
-path inside the container, and replaces itself with a `docker exec` into it — so
-the pane you get is an ordinary interactive shell or agent session, just on the
-other side of the container boundary.
+<p align="center">
+  <a href="https://herdr.dev/plugins"><img alt="Herdr plugin" src="https://img.shields.io/badge/herdr-plugin-76e6a3"></a>
+  <a href="https://herdr.dev/docs/plugins/"><img alt="Requires Herdr 0.8.0 or newer" src="https://img.shields.io/badge/herdr-%E2%89%A50.8.0-6db8ff"></a>
+  <img alt="Linux and WSL2" src="https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-f2c66d">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/gambtho/herdr-devcontainer"></a>
+  <a href="https://github.com/gambtho/herdr-devcontainer/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/gambtho/herdr-devcontainer/actions/workflows/ci.yml/badge.svg"></a>
+</p>
+
+<p align="center">
+  <img
+    src="docs/assets/herdr-devcontainer-hero.svg"
+    alt="herdr-devcontainer takes a repository's devcontainer.json through the official Dev Containers CLI and opens Herdr shell or coding-agent panes inside the resulting container."
+    width="100%"
+  >
+</p>
+
+Run [Herdr](https://herdr.dev) shells and coding-agent panes inside the **Dev
+Container the repository already defines**. The plugin uses the official
+[Dev Containers CLI](https://github.com/devcontainers/cli), keeps
+`devcontainer.json` as the source of truth, and requires no editor.
+
+Point it at a repository that carries a Dev Container configuration and it
+resolves the repository, brings the container up, maps your current directory to
+the matching path inside the container, and replaces itself with a `docker exec`
+— so the pane you get is an ordinary interactive shell or agent session, just on
+the other side of the container boundary. There is no second container format
+and nothing here re-implements `devcontainer.json`.
+
+> **Current boundary:** Linux, including WSL2 — the manifest declares
+> `platforms = ["linux"]`. Installing from GitHub compiles the Rust plugin
+> locally, so a Rust toolchain must be present. The target directory must be a
+> Git repository with a Dev Container configuration, unless that repository is
+> explicitly forced on in plugin config.
 
 ## Requirements
 
-- herdr ≥ 0.8.0
-- Docker, with a reachable daemon
-- The Dev Containers CLI: `npm install -g @devcontainers/cli`
-- A Rust toolchain — the plugin's `[[build]]` hook runs `cargo build --release`
-- Linux (the manifest declares `platforms = ["linux"]`)
+| | |
+|---|---|
+| [Herdr](https://herdr.dev) | **0.8.0 or newer** (`min_herdr_version` in the manifest) |
+| Platform | Linux or WSL2 |
+| Git | any recent version; the plugin shells out to `git worktree list` |
+| Docker | with a reachable daemon |
+| [Dev Containers CLI](https://github.com/devcontainers/cli) | `npm install -g @devcontainers/cli` |
+| Rust and Cargo | see the note below |
+
+Rust is required because the plugin manifest's build hook runs:
+
+```sh
+cargo build --release
+```
+
+`Cargo.toml` declares `rust-version = "1.74"`, but that declaration is currently
+stale: the committed `Cargo.lock` resolves transitive crates published with
+edition 2024, which no Cargo older than **1.85** can parse. Building this
+checkout has been verified to fail on 1.74 and 1.84 and to succeed on 1.85, so
+in practice **Rust 1.85 or newer** is what you need today.
 
 ## Install
 
 From GitHub:
 
-```
-herdr plugin install <owner>/<repo>
+```sh
+herdr plugin install gambtho/herdr-devcontainer
 ```
 
-For local development, which skips the build hook — build once yourself first:
+Herdr clones the repository and runs the manifest's build hook before
+registering the plugin; pass `--yes` to skip the confirmation prompt, or
+`--ref <tag-or-sha>` to pin a revision.
 
+Verify what got registered:
+
+```sh
+herdr plugin list --plugin devcontainer
+herdr plugin action list --plugin devcontainer
 ```
+
+For local development, build once yourself first — `herdr plugin link` does
+**not** run the manifest build hook:
+
+```sh
 cargo build --release
 herdr plugin link /path/to/herdr-devcontainer
 ```
@@ -37,12 +90,51 @@ Three panes, and one action per pane that opens it from anywhere:
 
 | Pane id | Action id | What it does |
 |---|---|---|
-| `shell` | `open-shell` | Interactive `sh -l` in the container |
-| `command` | `open-command` | Runs the configured `command` (default `claude`) |
-| `stop` | `open-stop` | Stops the repo's running dev container |
+| `shell` | `devcontainer.open-shell` | Interactive `sh -l` inside the repository's Dev Container |
+| `command` | `devcontainer.open-command` | Runs the configured `command` payload through `sh -lc` inside the container; default `claude` |
+| `stop` | `devcontainer.open-stop` | Popup that identifies the repository's container, names it, asks for confirmation, and stops it |
 
-Bind them in your herdr config using the fully qualified action id
-(`<plugin id>.<action id>`):
+Open a pane directly:
+
+```sh
+herdr plugin pane open --plugin devcontainer --entrypoint shell
+herdr plugin pane open --plugin devcontainer --entrypoint command
+```
+
+Or invoke the equivalent action. The CLI takes the bare action id, with
+`--plugin` to disambiguate:
+
+```sh
+herdr plugin action invoke open-shell --plugin devcontainer
+herdr plugin action invoke open-command --plugin devcontainer
+herdr plugin action invoke open-stop --plugin devcontainer
+```
+
+Opening a shell or command pane is the explicit lifecycle trigger. Container
+lifecycle is never attached to repository events, nothing is stopped
+automatically, and the plugin never runs `docker rm` — `stop` stops a container,
+it does not remove one.
+
+## Why use it
+
+- **One development environment.** Shells and agents see the same tools,
+  dependencies, users, and workspace path the repository's Dev Container already
+  defines for everyone else.
+- **No duplicated configuration.** The plugin delegates to `devcontainer up`; it
+  does not parse or reinterpret `devcontainer.json`.
+- **Visible bring-up.** Build and lifecycle-hook output stays in the new pane
+  instead of disappearing behind an editor.
+- **No editor required.** The official CLI is the only interpreter involved.
+- **Serialized startup.** A per-repository `flock` means two panes opened at
+  once cannot race through bring-up.
+- **Deterministic container selection.** If more than one running container
+  claims the repository, the plugin lists them and refuses to guess.
+- **Explicit, confirmed shutdown.** Stop is its own action, names the target,
+  and proceeds only on `y` or `yes`.
+
+## Keybindings
+
+Bind the fully qualified action id (`<plugin id>.<action id>`):
 
 ```toml
 [[keys.command]]
@@ -52,69 +144,150 @@ command = "devcontainer.open-shell"
 description = "dev container shell"
 
 [[keys.command]]
-key = "prefix+D"
+key = "prefix+shift+s"
 type = "plugin_action"
 command = "devcontainer.open-stop"
 description = "stop dev container"
 ```
 
+`prefix+shift+s` for stop is deliberate: Herdr's default `close_workspace`
+binding is `prefix+shift+d`, so binding stop to `prefix+D` would put a
+destructive plugin action on top of a destructive built-in one.
+
+These are examples, not reserved defaults. Check what your own map already uses
+before adopting them — `prefix+?` opens Herdr's help, and `herdr config check`
+validates `config.toml` and prints diagnostics.
+
 ## Configuration
 
-Optional, at `$XDG_CONFIG_HOME/herdr-devcontainer/config.toml` (falling back to
-`~/.config/herdr-devcontainer/config.toml`):
+Optional, at `$XDG_CONFIG_HOME/herdr-devcontainer/config.toml`, falling back to
+`~/.config/herdr-devcontainer/config.toml` when `XDG_CONFIG_HOME` is unset or
+empty:
 
 ```toml
-command = "claude"          # payload for the "command" pane
+# Any command available inside the container: claude, codex, opencode, ...
+command = "claude"
+
+# Ceiling for `devcontainer up`, in seconds.
 up_timeout_secs = 300
 
 [repos."/home/you/workspace/foo"]
-enabled = "false"           # "auto" (default) | "true" | "false"
+enabled = "auto"                                 # "auto" (default) | "true" | "false"
 config = ".devcontainer/alt/devcontainer.json"   # repo-relative
 ```
 
-A missing file means all defaults. Unknown keys are warnings, not errors. Repo
-keys are matched against the **canonicalized** repo root, and `config` values are
-repo-relative by contract — absolute paths and `..` components are rejected.
+| Setting | Meaning |
+|---|---|
+| `command` | Payload for the `command` pane; default `claude` |
+| `up_timeout_secs` | Bring-up timeout in seconds; default `300` |
+| `enabled = "auto"` | Require a Dev Container config at a standard or explicitly configured path |
+| `enabled = "true"` | Skip detection entirely and let `devcontainer up` decide what is valid |
+| `enabled = "false"` | Refuse to open container panes for that repository |
+| `config` | Alternate repo-relative `devcontainer.json` path |
 
-A read *failure* is deliberately not treated as a missing file: `NotFound` yields
-defaults, but a permission or I/O error is reported as an error, so an unreadable
-config can never silently re-enable a repo you set to `enabled = "false"`.
+Under `auto`, detection checks, in order:
+
+```text
+.devcontainer/devcontainer.json
+.devcontainer.json
+```
+
+Repo keys are matched against the **canonicalized** repo root. A `config` value
+is repo-relative by contract: absolute paths and `..` traversal are rejected in
+every mode, including `enabled = "true"`.
+
+Guarantees worth knowing:
+
+- A missing config file means defaults.
+- An unreadable one is an **error**, not a silent fallback — a permission or I/O
+  failure can never quietly re-enable a repo you set to `enabled = "false"`.
+- Unknown keys are warnings, not errors.
+
+## Repository and worktree behavior
+
+The plugin resolves the **main Git worktree** and uses that canonical path as
+repository and container identity. That matches the `devcontainer.local_folder`
+label the Dev Containers CLI writes itself, and it means every linked worktree
+of a repository shares one Dev Container rather than racing to create
+independent ones that would collide on ports and similar resources.
+
+That also defines the main limitation:
+
+> A linked worktree checked out **outside** the main repository directory is not
+> automatically mounted inside the main repository's container. When the current
+> directory cannot be mapped under the repository root, the pane starts at the
+> container's workspace root and prints a notice rather than pretending the
+> external checkout is available inside the container.
+
+For a current directory underneath the main repository root, the relative host
+path is appended to the container's `remoteWorkspaceFolder` and used as the
+`docker exec` working directory.
 
 ## How it works
 
-Container identity comes from the label the Dev Containers CLI sets itself,
-`devcontainer.local_folder=<repo root>`, where the repo root is the **main**
-worktree — so every linked worktree of a repo shares one container. If a repo has
-more than one *running* match, the plugin refuses to choose and tells you which
-ones it found, rather than guessing.
+For a shell or command pane, the wrapper:
 
-Two rules run through the whole implementation: bring-up is serialized per repo
-with an `flock`, so two panes opened at once cannot race; and uncertainty is
-never absence — a probe that fails, or a `docker ps` line that will not parse, is
-an error, never "there is no container."
+1. resolves the repository's main Git worktree from Herdr context, falling back
+   to Git on the pane and process working directories;
+2. detects the repository's Dev Container configuration;
+3. verifies the Dev Containers CLI is on `PATH` and the Docker daemon answers;
+4. discovers existing containers by the `devcontainer.local_folder` label;
+5. refuses to continue when more than one of them is running;
+6. acquires a per-repository lock;
+7. runs `devcontainer up` and validates its success result;
+8. maps the pane's directory into `remoteWorkspaceFolder`; and
+9. replaces itself with `docker exec -i -t`.
+
+Two rules run through the whole implementation. Host-side subprocesses are
+invoked as direct argv arrays with no shell in between, so repository-controlled
+paths cannot inject host commands — only the configured payload is interpreted,
+by `sh -lc` **inside** the container. And uncertainty is never absence: a probe
+that fails, or a `docker ps` line that will not parse, is an error, never "there
+is no container."
 
 The full design, including the wrapper flow step by step, is in
 [`docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md`](docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md).
 
-## Security note
+## Trust and security
 
-`devcontainer up` executes build hooks defined by the repository —
-`postCreateCommand`, `Dockerfile` steps, and so on. Opening a dev container in a
-repo you do not trust runs that repo's code, exactly as it does in VS Code Dev
-Containers; this plugin inherits that trust model and does not add to it.
+This plugin is not a security boundary, and opening a Dev Container is not
+sandboxing.
 
-The plugin never takes its payload command from repo content: the command run
-inside the container comes from your own config file (default `claude`) or is a
-plain login shell. Host-side arguments are passed as a direct argv array with no
-shell in between, so repository-controlled paths cannot inject host commands.
+- Installing a Herdr plugin runs its build and runtime commands as your user.
+  Review [`herdr-plugin.toml`](herdr-plugin.toml) and the source before
+  installing code you do not trust.
+- `devcontainer up` executes repository-controlled build and lifecycle code —
+  `Dockerfile` steps, `postCreateCommand`, and the rest. Opening a Dev Container
+  for a repository you do not trust runs that repository's code, exactly as it
+  does in VS Code Dev Containers. This plugin inherits that trust model and does
+  not add to it.
+- What a Dev Container does give you is a *consistent* environment, not an
+  isolated one.
+- The pane payload never comes from repository content. It is either a plain
+  login shell or the command in your own plugin config.
 
-## Tests
+## Development and tests
 
+```sh
+cargo build --release
+cargo test
+cargo test --test integration -- --ignored
 ```
-cargo test                                  # unit tests
-cargo test --test integration -- --ignored  # needs docker, @devcontainers/cli, script(1)
-```
 
-Note that nothing in this repo parses `herdr-plugin.toml`, so a green test run
-says nothing about the manifest being valid — that is only verified by installing
-the plugin into a real herdr and running the entrypoints.
+The ignored integration suite performs a real container bring-up and requires
+Docker, the Dev Containers CLI, and `script(1)`.
+
+Nothing in this repository parses `herdr-plugin.toml`, so a green Rust test run
+says nothing about the manifest being valid. That is only verified by linking or
+installing the plugin into a real Herdr and exercising all three entrypoints.
+
+## Status
+
+The source and manifest currently identify the plugin as `0.1.0`. There is not
+yet a tagged GitHub release, so an unpinned GitHub install follows the current
+default branch. A first tag would let users install a reviewed revision with
+`herdr plugin install gambtho/herdr-devcontainer --ref <tag>`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
