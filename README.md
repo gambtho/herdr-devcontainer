@@ -293,9 +293,14 @@ For a shell or command pane, the wrapper:
 Two rules run through the whole implementation. Host-side subprocesses are
 invoked as direct argv arrays with no shell in between, so repository-controlled
 paths cannot inject host commands — only the configured payload is interpreted,
-by the login shell **inside** the container. And uncertainty is never absence: a
-probe that fails, or a `docker ps` line that will not parse, is an error, never
-"there is no container."
+by the container's own shell **inside** the container. And uncertainty is never
+absence: a Docker check that fails, or a `docker ps` line that will not parse,
+is an error, never "there is no container."
+
+The shell probe is the one deliberate exception, because a container that will
+not name its user's shell is still a container worth opening. It degrades to
+`sh` rather than failing — but it says so, and says why, so the degraded pane is
+never mistaken for a working one.
 
 The full design, including the wrapper flow step by step, is in
 [`docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md`](docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md).
