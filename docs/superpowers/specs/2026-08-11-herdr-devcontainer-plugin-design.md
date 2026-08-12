@@ -440,6 +440,12 @@ login shell, so `-l` suppresses it. Verified in
 bash reads its rc file regardless of login status, so those keep `-l` and the
 `/etc/profile` values it brings.
 
+The flags are applied only to shells verified to accept them (sh, ash, dash,
+busybox, zsh, ksh, mksh, pdksh, yash, fish). Anything else is driven with bare
+`-c`: `tcsh -lic` fails with "Unknown option", and a shell that rejects its own
+flags yields a pane that never opens — strictly worse than the `sh -lc` this
+replaced.
+
 The payload is *not* wrapped in `exec`: shells already replace themselves when
 `-c` holds a single simple command, and the wrapper would break any other
 payload shape (`exec source env.sh && claude` fails with "exec: source: not

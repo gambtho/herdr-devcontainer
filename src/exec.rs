@@ -18,8 +18,18 @@ pub struct ExecSpec<'a> {
     pub payload: &'a Payload,
 }
 
+/// Shells verified to accept combined POSIX-style startup flags (`-li`,
+/// `-lic`). Not every shell does: `tcsh -lic` fails outright with "Unknown
+/// option", and a shell that rejects its own flags produces a pane that never
+/// opens — worse than the plain `sh` this replaced. Anything not on this list
+/// is driven with bare `-c`, which every shell worth naming accepts, and its
+/// own rc handling is left to it.
+const LOGIN_INTERACTIVE_SHELLS: &[&str] = &[
+    "ash", "busybox", "dash", "fish", "ksh", "ksh93", "mksh", "pdksh", "sh", "yash", "zsh",
+];
+
 /// The startup flags that make `shell` read the rc file its container's setup
-/// scripts write to.
+/// scripts write to, or `None` for a shell whose flags we cannot assume.
 ///
 /// Interactive is the point: zsh sources `~/.zshrc`, and bash `~/.bashrc`,
 /// *only* when interactive, and that is where Dev Container setup scripts put
@@ -34,19 +44,20 @@ pub struct ExecSpec<'a> {
 /// one), so adding `-l` for bash silently loses the very environment this is
 /// here to collect.
 ///
-/// Everything else keeps `-l`, and the `/etc/profile` values that come with it,
-/// because zsh reads `~/.zshrc` for any interactive shell and the ash/dash
+/// The listed shells keep `-l`, and the `/etc/profile` values that come with
+/// it, because zsh reads `~/.zshrc` for any interactive shell and the ash/dash
 /// family has no rc file to miss. Two cases fall between the cracks and are
 /// accepted: a `/bin/sh` that is really bash runs in POSIX mode and reads
 /// neither, and a shell whose basename is not `bash` but whose behavior is
 /// bash's gets login treatment.
-fn startup_flags(shell: &str, interactive_only: bool) -> &'static str {
-    let is_bash = shell.rsplit('/').next().unwrap_or_default() == "bash";
-    match (is_bash, interactive_only) {
-        (true, true) => "-ic",
-        (true, false) => "-i",
-        (false, true) => "-lic",
-        (false, false) => "-li",
+fn startup_flags(shell: &str, interactive_only: bool) -> Option<&'static str> {
+    let base = shell.rsplit('/').next().unwrap_or_default();
+    match base {
+        "bash" if interactive_only => Some("-ic"),
+        "bash" => Some("-i"),
+        b if LOGIN_INTERACTIVE_SHELLS.contains(&b) && interactive_only => Some("-lic"),
+        b if LOGIN_INTERACTIVE_SHELLS.contains(&b) => Some("-li"),
+        _ => None,
     }
 }
 
@@ -68,11 +79,16 @@ pub fn exec_argv(spec: &ExecSpec) -> Vec<String> {
     argv.push(spec.container_id.to_string());
     argv.push(spec.shell.to_string());
     match spec.payload {
-        // The pane's tty already makes a `-c`-less shell interactive; `-i` is
-        // passed anyway so the shape does not depend on how the pane was wired.
-        Payload::Shell => argv.push(startup_flags(spec.shell, false).to_string()),
+        // The pane's tty already makes a flagless shell interactive; `-i` is
+        // passed anyway, where it is safe to, so the shape does not depend on
+        // how the pane was wired.
+        Payload::Shell => {
+            if let Some(flags) = startup_flags(spec.shell, false) {
+                argv.push(flags.to_string());
+            }
+        }
         Payload::Command(cmd) => {
-            argv.push(startup_flags(spec.shell, true).to_string());
+            argv.push(startup_flags(spec.shell, true).unwrap_or("-c").to_string());
             // Deliberately *not* prefixed with `exec`. The payload is an
             // arbitrary shell fragment, and `exec` only accepts a command:
             // `exec source env.sh && claude` dies with "exec: source: not
@@ -158,10 +174,41 @@ mod tests {
     }
 
     #[test]
-    fn a_shell_merely_containing_bash_still_gets_login() {
-        // Only the basename decides; /usr/local/bin/bashly is not bash.
+    fn a_shell_merely_containing_bash_is_not_bash() {
+        // Only the basename decides; /usr/local/bin/bashly is not bash — and it
+        // is not a known shell either, so it gets the portable form.
         let argv = exec_argv(&spec("/w", "/usr/local/bin/bashly", &Payload::Shell));
-        assert_eq!(argv.last().unwrap(), "-li");
+        assert_eq!(argv.last().unwrap(), "/usr/local/bin/bashly");
+    }
+
+    #[test]
+    fn an_unknown_shell_gets_the_portable_form_rather_than_broken_flags() {
+        // `tcsh -lic` fails with "Unknown option: `-lic'" — a pane that never
+        // opens, which is worse than the plain `sh` this replaced. Verified in
+        // an alpine container with tcsh installed.
+        let argv = exec_argv(&spec("/w", "/bin/tcsh", &Payload::Command("claude".into())));
+        assert_eq!(
+            argv[argv.len() - 3..],
+            ["/bin/tcsh".to_string(), "-c".into(), "claude".into()]
+        );
+        // Nothing but the shell itself: a tty makes it interactive already.
+        let argv = exec_argv(&spec("/w", "/bin/tcsh", &Payload::Shell));
+        assert_eq!(argv.last().unwrap(), "/bin/tcsh");
+    }
+
+    #[test]
+    fn the_known_shells_all_take_login_interactive_flags() {
+        // Each verified to accept the combined flags before being listed.
+        for shell in [
+            "/bin/zsh",
+            "/bin/dash",
+            "/bin/ash",
+            "/bin/mksh",
+            "/usr/bin/fish",
+        ] {
+            let argv = exec_argv(&spec("/w", shell, &Payload::Command("claude".into())));
+            assert_eq!(argv[argv.len() - 2], "-lic", "{shell} should get -lic");
+        }
     }
 
     #[test]
