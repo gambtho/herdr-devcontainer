@@ -17,7 +17,7 @@ jobs:
     name: fmt, clippy, test, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable toolchain
         run: |
@@ -26,7 +26,7 @@ jobs:
           rustc --version && cargo --version
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -62,7 +62,7 @@ jobs:
     name: minimum supported Rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Read the version from Cargo.toml rather than hard-coding a second copy
       # that could drift away from the declaration it is supposed to verify.
@@ -84,7 +84,7 @@ jobs:
           rustc --version && cargo --version
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
