@@ -255,7 +255,13 @@ apply — except bash, which is the one shell that reads `~/.bashrc` *only* when
 interactive and **not** a login shell. Images that ship a `~/.bashrc` and no
 profile file at all are common enough (`devcontainers/base` is one) that adding
 `-l` for bash would lose exactly the environment this is here to collect, so
-bash gets `-i`/`-ic` and every other shell gets `-li`/`-lic`.
+bash gets `-i`/`-ic` and every other known shell gets `-li`/`-lic`.
+
+"Known" is literal: sh, ash, dash, busybox, zsh, ksh, mksh, pdksh, yash, and
+fish are each verified to accept those combined flags. A shell outside that list
+is driven with bare `-c` instead, because not every shell takes them —
+`tcsh -lic` fails with "Unknown option", which would produce a pane that never
+opens.
 
 Set `shell` for a repository to override the probe.
 
