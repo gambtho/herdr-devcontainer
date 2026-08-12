@@ -2,8 +2,9 @@
 //! Requires docker and the Dev Containers CLI. Run explicitly:
 //!     cargo test --test integration -- --ignored
 
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use herdr_devcontainer::{exec, preflight, up};
@@ -15,6 +16,35 @@ fn sh_ok(dir: &Path, cmd: &str, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "{cmd} {args:?} failed");
+}
+
+/// Stops whatever the Dev Containers CLI labelled for this fixture repo, so a
+/// failed assertion unwinds without leaving a container running on the host.
+struct StopFixtureContainer {
+    repo: std::path::PathBuf,
+}
+
+impl Drop for StopFixtureContainer {
+    fn drop(&mut self) {
+        // The label carries the canonical root, the same form the plugin uses.
+        let root = self
+            .repo
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo.clone());
+        let Ok(out) = Command::new("docker")
+            .args(["ps", "-q", "--filter"])
+            .arg(format!(
+                "label=devcontainer.local_folder={}",
+                root.display()
+            ))
+            .output()
+        else {
+            return;
+        };
+        for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            let _ = Command::new("docker").args(["stop", id]).status();
+        }
+    }
 }
 
 /// Build a throwaway git repo with a minimal devcontainer config.
@@ -39,6 +69,7 @@ fn bring_up_exec_and_stop_roundtrip() {
 
     let tmp = tempfile::tempdir().unwrap();
     let repo = fixture_repo(tmp.path());
+    let _cleanup = StopFixtureContainer { repo: repo.clone() };
 
     let result = up::bring_up(&devcontainer_bin, &repo, None, Duration::from_secs(300))
         .expect("devcontainer up");
@@ -74,6 +105,7 @@ fn the_binary_brings_up_and_execs_from_a_pane_invocation() {
 
     let tmp = tempfile::tempdir().unwrap();
     let repo = fixture_repo(tmp.path());
+    let _cleanup = StopFixtureContainer { repo: repo.clone() };
     let bin = env!("CARGO_BIN_EXE_herdr-devc");
 
     // No --shell: the pane runs the configured command payload, so we point it
@@ -108,13 +140,28 @@ fn the_binary_brings_up_and_execs_from_a_pane_invocation() {
         "binary did not reach the container payload\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // And `stop` finds it by label and reports the container it killed.
-    let out = Command::new(bin)
+    // And `stop` finds it by label and reports the container it killed. Stopping
+    // is confirmed, and only an explicit yes proceeds — a plain `output()` call
+    // hands the child no stdin at all, which the product correctly reads as a
+    // cancel. So drive it through a pipe: answer `y`, then close stdin so the
+    // "press Enter to close" hold that follows a successful stop sees EOF and
+    // returns instead of blocking the test forever.
+    let mut child = Command::new(bin)
         .arg("stop")
         .current_dir(&repo)
         .env("HERDR_PLUGIN_CONTEXT_JSON", &ctx)
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(b"y\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("stopping container"), "stdout: {stdout}");
     assert!(stdout.contains("stopped."), "stdout: {stdout}");
