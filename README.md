@@ -43,7 +43,7 @@ and nothing here re-implements `devcontainer.json`.
 | Git | any recent version; the plugin shells out to `git worktree list` |
 | Docker | with a reachable daemon |
 | [Dev Containers CLI](https://github.com/devcontainers/cli) | `npm install -g @devcontainers/cli` |
-| Rust and Cargo | see the note below |
+| Rust and Cargo | **1.74 or newer** (`rust-version` in `Cargo.toml`) |
 
 Rust is required because the plugin manifest's build hook runs:
 
@@ -51,11 +51,10 @@ Rust is required because the plugin manifest's build hook runs:
 cargo build --release
 ```
 
-`Cargo.toml` declares `rust-version = "1.74"`, but that declaration is currently
-stale: the committed `Cargo.lock` resolves transitive crates published with
-edition 2024, which no Cargo older than **1.85** can parse. Building this
-checkout has been verified to fail on 1.74 and 1.84 and to succeed on 1.85, so
-in practice **Rust 1.85 or newer** is what you need today.
+The committed `Cargo.lock` is resolved against that minimum rather than against
+the newest published dependencies, so a 1.74 toolchain builds this checkout as
+it stands. CI verifies the declared minimum on every change, so the number above
+cannot drift away from what actually compiles.
 
 ## Install
 

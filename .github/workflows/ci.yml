@@ -13,12 +13,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # There is deliberately no MSRV job yet. `Cargo.toml` declares
-  # `rust-version = "1.74"`, but the committed `Cargo.lock` resolves transitive
-  # crates (hashbrown 0.17) that are published with edition 2024, which no Cargo
-  # older than 1.85 can parse — so a job pinned to the declared minimum fails
-  # before it compiles a line of this crate. Add one here once the declaration
-  # and the lockfile agree.
   rust:
     name: fmt, clippy, test, build
     runs-on: ubuntu-latest
@@ -49,13 +43,56 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       # --all-targets compiles the ignored integration suite without running it:
       # the real suite needs Docker, the Dev Containers CLI, and script(1), which
       # this runner does not provide deterministically.
       - name: Test
-        run: cargo test --all-targets
+        run: cargo test --all-targets --locked
 
       - name: Release build
         run: cargo build --release --locked
+
+  # The declared minimum is only meaningful if something checks it. The lockfile
+  # is deliberately resolved against this version rather than against the newest
+  # publications, so this job is what stops a routine `cargo update` from
+  # silently raising the floor for anyone installing the plugin from GitHub.
+  msrv:
+    name: minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the version from Cargo.toml rather than hard-coding a second copy
+      # that could drift away from the declaration it is supposed to verify.
+      - name: Resolve declared MSRV
+        id: msrv
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].rust_version')"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Cargo.toml declares no rust-version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Declared MSRV: $version"
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+          rustc --version && cargo --version
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-msrv-${{ steps.msrv.outputs.version }}-
+
+      - name: Check against the locked dependency set
+        run: cargo check --all-targets --locked
