@@ -259,6 +259,13 @@ bash gets `-i`/`-ic` and every other shell gets `-li`/`-lic`.
 
 Set `shell` for a repository to override the probe.
 
+One consequence worth knowing: rc files run, so an rc file that changes
+directory wins over the mapped working directory. `docker exec -w` still puts
+the shell in the right place — a `cd /app` in `~/.zshrc` (some images bake one
+in) simply runs afterwards. If subdirectory panes matter more than that `cd`,
+make the rc line conditional; there is nothing this plugin can do from outside
+without discarding the rc file's environment along with it.
+
 What this does **not** do is apply `remoteEnv` from `devcontainer.json`. That
 value is a merge of the config file, every Feature's contributed metadata, and
 the image's `devcontainer.metadata` label, and `devcontainer up` does not report
