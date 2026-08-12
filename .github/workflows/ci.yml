@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only: nothing here publishes, comments, or writes to the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # There is deliberately no MSRV job yet. `Cargo.toml` declares
+  # `rust-version = "1.74"`, but the committed `Cargo.lock` resolves transitive
+  # crates (hashbrown 0.17) that are published with edition 2024, which no Cargo
+  # older than 1.85 can parse — so a job pinned to the declared minimum fails
+  # before it compiles a line of this crate. Add one here once the declaration
+  # and the lockfile agree.
+  rust:
+    name: fmt, clippy, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version && cargo --version
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-stable-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-stable-
+
+      - name: Validate package metadata
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # --all-targets compiles the ignored integration suite without running it:
+      # the real suite needs Docker, the Dev Containers CLI, and script(1), which
+      # this runner does not provide deterministically.
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Release build
+        run: cargo build --release --locked
