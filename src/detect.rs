@@ -52,6 +52,7 @@ mod tests {
         RepoConfig {
             enabled,
             config: config.map(String::from),
+            ..RepoConfig::default()
         }
     }
 

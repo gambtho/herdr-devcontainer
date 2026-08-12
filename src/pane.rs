@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::discover::{self, Container};
 use crate::error::Error;
 use crate::exec::{self, Payload};
-use crate::{config, context, detect, lockfile, preflight, up, workdir};
+use crate::{config, context, detect, lockfile, preflight, shell, up, workdir};
 
 /// Spec wrapper-flow step 4. `select_running` already refuses to choose between
 /// several running matches; here we only need its error, not its selection.
@@ -42,8 +42,14 @@ pub fn run_pane(shell: bool) -> Result<(), Error> {
         )?
     };
 
-    let cwd = process_cwd.canonicalize().unwrap_or(process_cwd);
-    let wd = workdir::map_workdir(&repo_root, &cwd, &up_result.remote_workspace_folder);
+    let cwd = context::pane_cwd(&ctx, &process_cwd);
+    if let Some(unresolved) = &cwd.unresolved {
+        eprintln!(
+            "note: {unresolved} could not be resolved; starting from {} instead",
+            cwd.path.display()
+        );
+    }
+    let wd = workdir::map_workdir(&repo_root, &cwd.path, &up_result.remote_workspace_folder);
     if wd.outside_repo {
         eprintln!(
             "note: current directory is not under {}; starting at the container workspace root",
@@ -56,12 +62,28 @@ pub fn run_pane(shell: bool) -> Result<(), Error> {
     } else {
         Payload::Command(cfg.command.clone())
     };
-    let argv = exec::exec_argv(
-        &up_result.container_id,
-        up_result.remote_user.as_deref(),
-        &wd.path,
-        &payload,
-    );
+    // Configured value wins; otherwise ask the container. A probe that cannot
+    // answer says so and says why, because the `sh` fallback silently
+    // reinstates the missing rc files this exists to load.
+    let exec_shell = match repo_cfg.shell.clone() {
+        Some(configured) => configured,
+        None => shell::probe(&up_result.container_id, up_result.remote_user.as_deref())
+            .unwrap_or_else(|why| {
+                eprintln!(
+                    "note: could not read the container user's login shell ({why}); using {}, so rc files like ~/.zshrc will not be loaded",
+                    shell::FALLBACK_SHELL
+                );
+                shell::FALLBACK_SHELL.to_string()
+            }),
+    };
+    let argv = exec::exec_argv(&exec::ExecSpec {
+        container_id: &up_result.container_id,
+        remote_user: up_result.remote_user.as_deref(),
+        workdir: &wd.path,
+        shell: &exec_shell,
+        env: &repo_cfg.env,
+        payload: &payload,
+    });
     // exec_into replaces the process; reaching the line below means it failed.
     Err(Error::Io(exec::exec_into(&argv)))
 }

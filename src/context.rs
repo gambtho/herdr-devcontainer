@@ -52,6 +52,55 @@ pub fn resolve_repo_root(ctx: &PluginContext, process_cwd: &Path) -> Result<Path
     })
 }
 
+/// Where the pane will start, plus any directory that was named but could not
+/// be resolved. Falling through an unreadable directory can land somewhere that
+/// is still inside the repository, where nothing downstream would notice — so
+/// the skipped name travels with the result for the caller to report.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PaneCwd {
+    pub path: PathBuf,
+    pub unresolved: Option<String>,
+}
+
+/// The directory the *user* is in, for mapping into the container.
+///
+/// Not the wrapper's own cwd: herdr spawns a plugin pane with the plugin root
+/// as its working directory (manifest commands are plugin-relative, so they
+/// could not resolve otherwise). Reading `current_dir()` here made every launch
+/// look like an out-of-repo checkout. The invocation context carries the real
+/// pane directory; the process cwd survives only as the last resort for a
+/// context-less invocation.
+pub fn pane_cwd(ctx: &PluginContext, process_cwd: &Path) -> PaneCwd {
+    let candidates = [
+        ctx.focused_pane_cwd.as_deref(),
+        ctx.workspace_cwd.as_deref(),
+    ];
+    let mut unresolved = None;
+    for dir in candidates
+        .into_iter()
+        .flatten()
+        .filter(|d| !d.trim().is_empty())
+    {
+        match Path::new(dir).canonicalize() {
+            Ok(canon) => {
+                return PaneCwd {
+                    path: canon,
+                    unresolved,
+                }
+            }
+            // Only the first one is worth reporting: it is the directory the
+            // user was actually in.
+            Err(_) => unresolved.get_or_insert_with(|| dir.to_string()),
+        };
+    }
+    PaneCwd {
+        path: process_cwd
+            .canonicalize()
+            .unwrap_or_else(|_| process_cwd.to_path_buf()),
+        unresolved,
+    }
+}
+
 /// The first `worktree` entry of `git worktree list --porcelain` is the main
 /// worktree — the repo-scoped container identity from the spec.
 fn main_worktree_root(dir: &Path) -> Option<PathBuf> {
@@ -173,6 +222,66 @@ mod tests {
         };
         let root = resolve_repo_root(&ctx, Path::new("/")).unwrap();
         assert_eq!(root, main.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn pane_cwd_prefers_the_focused_pane_over_everything_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let focused = tmp.path().join("focused");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&focused).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        let ctx = PluginContext {
+            focused_pane_cwd: Some(focused.display().to_string()),
+            workspace_cwd: Some(workspace.display().to_string()),
+            ..Default::default()
+        };
+        let cwd = pane_cwd(&ctx, Path::new("/"));
+        assert_eq!(cwd.path, focused.canonicalize().unwrap());
+        assert_eq!(cwd.unresolved, None);
+    }
+
+    #[test]
+    fn pane_cwd_falls_through_a_directory_that_no_longer_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let gone = tmp.path().join("gone");
+        let ctx = PluginContext {
+            focused_pane_cwd: Some(gone.display().to_string()),
+            workspace_cwd: Some(workspace.display().to_string()),
+            ..Default::default()
+        };
+        let cwd = pane_cwd(&ctx, Path::new("/"));
+        assert_eq!(cwd.path, workspace.canonicalize().unwrap());
+        // The fallback can land inside the repo, where nothing downstream would
+        // notice the user's real directory went missing.
+        assert_eq!(
+            cwd.unresolved.as_deref(),
+            Some(gone.display().to_string()).as_deref()
+        );
+    }
+
+    #[test]
+    fn pane_cwd_ignores_empty_context_strings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = PluginContext {
+            focused_pane_cwd: Some(String::new()),
+            workspace_cwd: Some(String::new()),
+            ..Default::default()
+        };
+        let cwd = pane_cwd(&ctx, tmp.path());
+        assert_eq!(cwd.path, tmp.path().canonicalize().unwrap());
+        assert_eq!(cwd.unresolved, None);
+    }
+
+    #[test]
+    fn pane_cwd_without_context_is_the_process_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = PluginContext::default();
+        let cwd = pane_cwd(&ctx, tmp.path());
+        assert_eq!(cwd.path, tmp.path().canonicalize().unwrap());
+        assert_eq!(cwd.unresolved, None);
     }
 
     #[test]

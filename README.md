@@ -96,8 +96,8 @@ Three panes, and one action per pane that opens it from anywhere:
 
 | Pane id | Action id | What it does |
 |---|---|---|
-| `shell` | `devcontainer.open-shell` | Interactive `sh -l` inside the repository's Dev Container |
-| `command` | `devcontainer.open-command` | Runs the configured `command` payload through `sh -lc` inside the container; default `claude` |
+| `shell` | `devcontainer.open-shell` | Interactive login shell inside the repository's Dev Container |
+| `command` | `devcontainer.open-command` | Runs the configured `command` payload through an interactive login shell inside the container; default `claude` |
 | `stop` | `devcontainer.open-stop` | Popup that identifies the repository's container, names it, asks for confirmation, and stops it |
 
 Open a pane directly:
@@ -180,6 +180,8 @@ up_timeout_secs = 300
 [repos."/home/you/workspace/foo"]
 enabled = "auto"                                 # "auto" (default) | "true" | "false"
 config = ".devcontainer/alt/devcontainer.json"   # repo-relative
+shell = "/bin/zsh"                               # default: the container user's login shell
+env = ["ANTHROPIC_BASE_URL=http://proxy:8080"]   # passed as `docker exec -e`
 ```
 
 | Setting | Meaning |
@@ -190,6 +192,12 @@ config = ".devcontainer/alt/devcontainer.json"   # repo-relative
 | `enabled = "true"` | Skip detection entirely and let `devcontainer up` decide what is valid |
 | `enabled = "false"` | Refuse to open container panes for that repository |
 | `config` | Alternate repo-relative `devcontainer.json` path |
+| `shell` | Shell to exec into, overriding the one probed from the container |
+| `env` | `KEY=value` assignments passed to `docker exec -e` |
+
+An `env` entry that is not `KEY=value` is dropped with a warning rather than
+forwarded: `docker exec -e NAME` with no `=` exports the *host's* variable of
+that name into the container, which is never what the setting asked for.
 
 Under `auto`, detection checks, in order:
 
@@ -227,7 +235,37 @@ That also defines the main limitation:
 
 For a current directory underneath the main repository root, the relative host
 path is appended to the container's `remoteWorkspaceFolder` and used as the
-`docker exec` working directory.
+`docker exec` working directory. That directory comes from Herdr's invocation
+context (the focused pane, then the workspace), not from the wrapper's own
+working directory — Herdr runs a plugin pane from the *plugin root*, so reading
+the process cwd would report every launch as an out-of-repo checkout.
+
+## Environment inside the pane
+
+Panes exec the container user's shell **interactively** — the shell from the
+container's passwd entry, `sh` (with a printed note) when that cannot be read or
+names `nologin`/`false`. Interactive is the part that matters: `~/.zshrc` and
+`~/.bashrc` are sourced only by an interactive shell, and that is where Dev
+Container setup scripts put `PATH` entries and API endpoints. A login-only shell
+reads `~/.zprofile` and stops, which is how an agent in a container silently
+bypasses a configured proxy.
+
+Shells are also started as **login** shells, so `/etc/profile` and `~/.zprofile`
+apply — except bash, which is the one shell that reads `~/.bashrc` *only* when
+interactive and **not** a login shell. Images that ship a `~/.bashrc` and no
+profile file at all are common enough (`devcontainers/base` is one) that adding
+`-l` for bash would lose exactly the environment this is here to collect, so
+bash gets `-i`/`-ic` and every other shell gets `-li`/`-lic`.
+
+Set `shell` for a repository to override the probe.
+
+What this does **not** do is apply `remoteEnv` from `devcontainer.json`. That
+value is a merge of the config file, every Feature's contributed metadata, and
+the image's `devcontainer.metadata` label, and `devcontainer up` does not report
+the resolved result — so parsing the config file alone would produce a partial
+environment that looks authoritative. In practice the pane's shell already
+supplies what `remoteEnv` sets, because the same setup scripts write both. When
+it does not, list the assignments explicitly in `env`.
 
 ## How it works
 
@@ -241,15 +279,16 @@ For a shell or command pane, the wrapper:
 5. refuses to continue when more than one of them is running;
 6. acquires a per-repository lock;
 7. runs `devcontainer up` and validates its success result;
-8. maps the pane's directory into `remoteWorkspaceFolder`; and
-9. replaces itself with `docker exec -i -t`.
+8. maps the pane's directory into `remoteWorkspaceFolder`;
+9. probes the container user's login shell; and
+10. replaces itself with `docker exec -i -t`.
 
 Two rules run through the whole implementation. Host-side subprocesses are
 invoked as direct argv arrays with no shell in between, so repository-controlled
 paths cannot inject host commands — only the configured payload is interpreted,
-by `sh -lc` **inside** the container. And uncertainty is never absence: a probe
-that fails, or a `docker ps` line that will not parse, is an error, never "there
-is no container."
+by the login shell **inside** the container. And uncertainty is never absence: a
+probe that fails, or a `docker ps` line that will not parse, is an error, never
+"there is no container."
 
 The full design, including the wrapper flow step by step, is in
 [`docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md`](docs/superpowers/specs/2026-08-11-herdr-devcontainer-plugin-design.md).

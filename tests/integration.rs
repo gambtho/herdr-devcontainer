@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use herdr_devcontainer::{exec, preflight, up};
+use herdr_devcontainer::{exec, preflight, shell, up};
 
 fn sh_ok(dir: &Path, cmd: &str, args: &[&str]) {
     let status = Command::new(cmd)
@@ -76,13 +76,21 @@ fn bring_up_exec_and_stop_roundtrip() {
     assert!(!result.container_id.is_empty());
     assert!(result.remote_workspace_folder.starts_with('/'));
 
-    // A non-interactive exec proves the container answers.
-    let argv = exec::exec_argv(
-        &result.container_id,
-        result.remote_user.as_deref(),
-        &result.remote_workspace_folder,
-        &exec::Payload::Command("echo alive".into()),
-    );
+    // The probe must name a real shell for this image — `devcontainers/base`
+    // gives its user /bin/bash — so a `None` here is a regression in the probe,
+    // not a property of the fixture.
+    let exec_shell = shell::probe(&result.container_id, result.remote_user.as_deref())
+        .expect("probe names the container user's login shell");
+    assert!(exec_shell.starts_with('/'), "{exec_shell} is not a path");
+    let payload = exec::Payload::Command("echo alive $ALIVE_MARKER".into());
+    let argv = exec::exec_argv(&exec::ExecSpec {
+        container_id: &result.container_id,
+        remote_user: result.remote_user.as_deref(),
+        workdir: &result.remote_workspace_folder,
+        shell: &exec_shell,
+        env: &["ALIVE_MARKER=yes".to_string()],
+        payload: &payload,
+    });
     // Drop -t for a non-tty test environment.
     let argv: Vec<&str> = argv
         .iter()
@@ -90,7 +98,9 @@ fn bring_up_exec_and_stop_roundtrip() {
         .filter(|a| *a != "-t")
         .collect();
     let out = Command::new(argv[0]).args(&argv[1..]).output().unwrap();
-    assert!(String::from_utf8_lossy(&out.stdout).contains("alive"));
+    // "alive yes" rather than "alive": the marker proves `-e` reached the
+    // container, which is the only way repo-configured env gets in.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("alive yes"));
 
     sh_ok(&repo, "docker", &["stop", &result.container_id]);
 }
