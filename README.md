@@ -96,8 +96,8 @@ Three panes, and one action per pane that opens it from anywhere:
 
 | Pane id | Action id | What it does |
 |---|---|---|
-| `shell` | `devcontainer.open-shell` | Interactive login shell inside the repository's Dev Container |
-| `command` | `devcontainer.open-command` | Runs the configured `command` payload through an interactive login shell inside the container; default `claude` |
+| `shell` | `devcontainer.open-shell` | The container user's shell, interactive, inside the repository's Dev Container |
+| `command` | `devcontainer.open-command` | Runs the configured `command` payload through that same interactive shell; default `claude` |
 | `stop` | `devcontainer.open-stop` | Popup that identifies the repository's container, names it, asks for confirmation, and stops it |
 
 Open a pane directly:
