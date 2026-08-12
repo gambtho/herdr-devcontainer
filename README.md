@@ -1,6 +1,7 @@
 # herdr-devcontainer — Dev Container panes for Herdr
 
 <p align="center">
+  <a href="https://github.com/gambtho/herdr-devcontainer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/gambtho/herdr-devcontainer"></a>
   <a href="https://herdr.dev/plugins"><img alt="Herdr plugin" src="https://img.shields.io/badge/herdr-plugin-76e6a3"></a>
   <a href="https://herdr.dev/docs/plugins/"><img alt="Requires Herdr 0.8.0 or newer" src="https://img.shields.io/badge/herdr-%E2%89%A50.8.0-6db8ff"></a>
   <img alt="Linux and WSL2" src="https://img.shields.io/badge/platform-Linux%20%7C%20WSL2-f2c66d">
@@ -282,10 +283,16 @@ installing the plugin into a real Herdr and exercising all three entrypoints.
 
 ## Status
 
-The source and manifest currently identify the plugin as `0.1.0`. There is not
-yet a tagged GitHub release, so an unpinned GitHub install follows the current
-default branch. A first tag would let users install a reviewed revision with
-`herdr plugin install gambtho/herdr-devcontainer --ref <tag>`.
+The current release is
+[`v0.1.0`](https://github.com/gambtho/herdr-devcontainer/releases/tag/v0.1.0),
+matching the version in both `Cargo.toml` and the plugin manifest. Pin to it
+with `--ref` to install a reviewed revision:
+
+```sh
+herdr plugin install gambtho/herdr-devcontainer --ref v0.1.0
+```
+
+An install without `--ref` follows the current default branch instead.
 
 ## License
 

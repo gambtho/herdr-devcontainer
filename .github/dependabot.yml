@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # GitHub Actions only. Pinned action majors go stale silently — the Node 20
+  # runtime deprecation that annotated every CI run is exactly this class of
+  # problem — and an action bump cannot affect what the plugin does at runtime,
+  # so these are safe to land automatically once CI is green.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    groups:
+      actions:
+        patterns: ["*"]
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+
+  # There is deliberately no `cargo` entry.
+  #
+  # Cargo.lock is resolved against the MSRV declared in Cargo.toml (1.74) rather
+  # than against the newest publications, and the `msrv` CI job enforces that.
+  # Dependabot is not MSRV-aware, so routine version updates would keep pulling
+  # crates published with edition 2024, failing that job on every PR. Raising the
+  # floor for everyone who installs this plugin from source should be a decision,
+  # not a weekly pull request.
+  #
+  # Dependabot *security* updates are enabled at the repository level and are not
+  # configured here, so vulnerable dependencies still raise a PR. Those are
+  # reviewed by hand, because a security fix that raises the MSRV is a genuine
+  # trade-off rather than a rubber stamp.
