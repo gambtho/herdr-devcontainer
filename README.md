@@ -228,7 +228,7 @@ independent ones that would collide on ports and similar resources.
 That label only matches when the CLI created the container. Labels are written
 once, at creation, and VS Code on Windows writes `local_folder` as the host's
 UNC view of the WSL path — `\\wsl.localhost\Ubuntu\home\you\repo` — which no
-POSIX repository root can equal. Nothing rewrites it afterwards: Docker Compose
+POSIX repository root can equal. Nothing rewrites it afterward: Docker Compose
 reuses containers by its own project name, so a container VS Code created stays
 reachable through `devcontainer up` while carrying a label the plugin cannot
 match. Discovery therefore also looks containers up by `devcontainer.config_file`,

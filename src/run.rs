@@ -82,9 +82,10 @@ fn kill_group(child: &Child) {
 
 /// A captured stream, plus whether reading it ended early.
 ///
-/// `incomplete` exists because a read error and a clean EOF used to look
-/// identical: both just stopped the loop. A caller that parses the result then
-/// treats a truncated stream as the whole answer.
+/// `incomplete` covers both ways bytes go missing: a read error that used to be
+/// indistinguishable from EOF, and output past `CAPTURE_LIMIT`. A caller that
+/// parses the result would otherwise treat a truncated stream as the whole
+/// answer — and truncation on a line boundary parses perfectly.
 pub struct Capture {
     pub text: String,
     pub incomplete: bool,
@@ -106,9 +107,14 @@ fn capture_thread<R: Read + Send + 'static>(stream: Option<R>) -> std::thread::J
                         break;
                     }
                     Ok(n) => {
-                        if out.len() < CAPTURE_LIMIT {
-                            let take = n.min(CAPTURE_LIMIT - out.len());
-                            out.extend_from_slice(&buf[..take]);
+                        // Keep reading past the cap rather than breaking: the
+                        // child blocks on a full pipe if nobody drains it. Only
+                        // the appending stops.
+                        let room = CAPTURE_LIMIT.saturating_sub(out.len());
+                        let take = n.min(room);
+                        out.extend_from_slice(&buf[..take]);
+                        if take < n {
+                            incomplete = true;
                         }
                     }
                 }
@@ -226,6 +232,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res.stdout.len(), CAPTURE_LIMIT);
+        // Hitting the cap drops bytes just as surely as a read error does. A
+        // `docker ps` listing cut at the cap still parses, so without this the
+        // truncated list would be indexed as every container that exists.
+        assert!(res.stdout_incomplete, "a capped capture is not a whole one");
     }
 
     #[test]
