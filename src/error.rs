@@ -63,8 +63,12 @@ impl Error {
             Error::MultipleRunningContainers { .. } => {
                 Some("stop the extras with `docker stop <id>` and retry")
             }
+            // Deliberately says nothing about the containers *not* listed. When
+            // docker never reached the daemon, every id lands here and nothing
+            // stopped — a hint claiming "the rest stopped" would then be a
+            // confident statement about a state we never observed.
             Error::ContainersNotStopped { .. } => {
-                Some("the rest of the project stopped; stop these with `docker stop <id>`")
+                Some("stop them with `docker stop <id>`, or retry once docker is reachable")
             }
             _ => None,
         }

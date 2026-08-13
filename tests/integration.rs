@@ -65,6 +65,79 @@ fn fixture_repo(tmp: &Path) -> std::path::PathBuf {
 /// equal, while `config_file` holds the POSIX path the CLI resolved inside WSL.
 /// Discovery keyed only on `local_folder` reports "no container" for a
 /// container that is running in front of the user — the reported regression.
+/// The app container exits on its own — a crash, an OOM kill, a stop from
+/// another pane — while its services keep running. Reporting "no running dev
+/// container" then walks the user away from a live database.
+#[test]
+#[ignore = "requires docker"]
+fn an_exited_dev_container_does_not_hide_its_running_services() {
+    preflight::check_docker("docker").expect("docker daemon");
+
+    let project = "herdrdevc_orphan_fixture";
+    struct Down(&'static str);
+    impl Drop for Down {
+        fn drop(&mut self) {
+            let Ok(out) = Command::new("docker")
+                .args([
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    &format!("label=com.docker.compose.project={}", self.0),
+                ])
+                .output()
+            else {
+                return;
+            };
+            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                let _ = Command::new("docker").args(["rm", "-f", id]).status();
+            }
+        }
+    }
+    let _cleanup = Down(project);
+
+    let member = |service: &str, cmd: &str| -> String {
+        let out = Command::new("docker")
+            .args(["run", "-d", "--label"])
+            .arg(format!("com.docker.compose.project={project}"))
+            .arg("--label")
+            .arg(format!("com.docker.compose.service={service}"))
+            .args(["--name", &format!("{project}-{service}-1")])
+            .args(["alpine:3.20", "sh", "-c", cmd])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run {service} failed");
+        String::from_utf8_lossy(&out.stdout).trim()[..12].to_string()
+    };
+    // The app exits immediately; the db keeps running.
+    let app = member("app", "exit 0");
+    let db = member("db", "sleep 300");
+
+    // Wait for the app to actually be gone before asserting on it.
+    for _ in 0..50 {
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", &app])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&out.stdout).trim() == "false" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // This is what discovery hands over: the dev container, exited.
+    let exited = vec![discover::Container {
+        id: app.clone(),
+        name: format!("{project}-app-1"),
+        state: "exited".to_string(),
+    }];
+    let orphans = compose::orphaned_members(&exited).expect("orphan lookup");
+    assert_eq!(
+        orphans.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        vec![db.as_str()],
+        "the running db must be reported, not swallowed with the exited app"
+    );
+}
+
 /// Stopping a compose-based dev container takes its whole project down.
 ///
 /// The app service is only one container of several; leaving the database and

@@ -98,7 +98,7 @@ Three panes, and one action per pane that opens it from anywhere:
 |---|---|---|
 | `shell` | `devcontainer.open-shell` | The container user's shell, interactive, inside the repository's Dev Container |
 | `command` | `devcontainer.open-command` | Runs the configured `command` payload through that same interactive shell; default `claude` |
-| `stop` | `devcontainer.open-stop` | Popup that identifies the repository's container, names it, asks for confirmation, and stops it |
+| `stop` | `devcontainer.open-stop` | Popup that identifies the repository's container — and, for a Compose-based Dev Container, every service alongside it — names them, asks for confirmation, and stops them |
 
 Open a pane directly:
 
@@ -118,8 +118,24 @@ herdr plugin action invoke open-stop --plugin devcontainer
 
 Opening a shell or command pane is the explicit lifecycle trigger. Container
 lifecycle is never attached to repository events, nothing is stopped
-automatically, and the plugin never runs `docker rm` — `stop` stops a container,
-it does not remove one.
+automatically, and the plugin never runs `docker rm` — `stop` stops containers,
+it does not remove them.
+
+For a Compose-based Dev Container, stop takes down the **whole Compose
+project**, not just the service the pane runs in. That is what
+`devcontainer.json`'s default `shutdownAction` of `stopCompose` asks for, and
+stopping the app while its database and cache keep running is rarely what
+"stop the Dev Container" meant. Project membership is read from the container's
+own `com.docker.compose.project` label — the same label Compose itself uses —
+so nothing here re-derives the project name from `devcontainer.json`. The
+confirmation lists every container it will stop, by service, name, and id.
+
+Containers started by `docker compose run` are left alone, matching
+`docker compose stop`. The Dev Container's own service is stopped and waited on
+before the rest, so it releases its database connections first. If the Dev
+Container has exited on its own while its services keep running, stop says so
+and offers to stop what is left — an absent Dev Container is not an absent
+project.
 
 ## Why use it
 
@@ -135,8 +151,9 @@ it does not remove one.
   once cannot race through bring-up.
 - **Deterministic container selection.** If more than one running container
   claims the repository, the plugin lists them and refuses to guess.
-- **Explicit, confirmed shutdown.** Stop is its own action, names the target,
-  and proceeds only on `y` or `yes`.
+- **Explicit, confirmed shutdown.** Stop is its own action, names every
+  container it will stop — the whole Compose project, where there is one — and
+  proceeds only on `y` or `yes`.
 
 ## Keybindings
 

@@ -13,38 +13,39 @@ pub fn stop_argv(ids: &[String]) -> Vec<String> {
     argv
 }
 
-/// Decide whether the stop actually stopped everything.
+/// Stop `ids` in one call, then say nothing about whether it worked.
 ///
-/// `docker stop` echoes each container it stopped, so anything absent from
-/// stdout did not stop. A container docker reports as gone counts as stopped —
-/// that is the state the user asked for. Anything else is named in the error:
-/// with several containers in play, a partial stop that printed "stopped."
-/// would send the user away believing a database is down when it is running.
-fn classify_stop(requested: &[String], res: &crate::run::RunResult) -> Result<(), Error> {
-    let stopped: std::collections::HashSet<&str> = res
-        .stdout
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let stderr_lower = res.stderr.to_lowercase();
-    let still_running: Vec<String> = requested
-        .iter()
-        .filter(|id| !stopped.contains(id.as_str()))
-        .filter(|id| {
-            // "No such container: <id>" means it is already gone, not stuck.
-            !stderr_lower
-                .lines()
-                .any(|l| l.contains("no such container") && l.contains(&id.to_lowercase()))
-        })
-        .cloned()
-        .collect();
-    if still_running.is_empty() {
+/// docker stops the listed containers in *parallel* — the argument order only
+/// controls the order results print — so a call is one grace window regardless
+/// of how many containers it names. Verification is deliberately not done here:
+/// see `verify_stopped`, which asks docker what is running rather than reading
+/// this call's output.
+fn stop_call(ids: &[String]) -> Result<crate::run::RunResult, Error> {
+    // docker's SIGTERM grace is 10s before SIGKILL, and the containers in one
+    // call share that window, so the budget does not scale with the count.
+    Ok(run(
+        &stop_argv(ids),
+        Duration::from_secs(STOP_TIMEOUT_SECS),
+        StderrMode::Capture,
+    )?)
+}
+
+const STOP_TIMEOUT_SECS: u64 = 30;
+
+/// Confirm the stop by asking docker what is still running.
+///
+/// Not by parsing `docker stop`'s output: on timeout the CLI is killed and its
+/// output is silent about what landed, and "no such container" handling meant
+/// matching English prose to decide whether a container was gone. A container
+/// that is not running is stopped, whichever way it got there.
+fn verify_stopped(targets: &[compose::Member], stop_detail: String) -> Result<(), Error> {
+    let alive = compose::still_running(targets)?;
+    if alive.is_empty() {
         return Ok(());
     }
     Err(Error::ContainersNotStopped {
-        ids: still_running,
-        detail: tail(res.stderr.trim(), 500),
+        ids: alive.iter().map(|m| m.name.clone()).collect(),
+        detail: stop_detail,
     })
 }
 
@@ -193,39 +194,67 @@ pub fn run_stop() -> Result<(), Error> {
     let config_files = discovery_config_files(&repo_root, &cfg.repo(&repo_root))?;
 
     let containers = discover::list(&repo_root, &config_files)?;
-    match discover::select_running(&containers, &repo_root)? {
+    let targets = match discover::select_running(&containers, &repo_root)? {
+        // Everything that goes down together, so the confirmation can name it
+        // all before the user commits to it.
+        Some(c) => compose::stop_set(&c.id, &c.name)?,
+        // The dev container is not running — but its compose project may still
+        // be. Saying "no running dev container" while postgres serves is the
+        // same false absence this path exists to prevent.
         None => {
-            println!("no running dev container for {}", repo_root.display());
-            Ok(())
+            let orphans = compose::orphaned_members(&containers)?;
+            if !orphans.is_empty() {
+                println!(
+                    "the dev container for {} is not running, but {} of its compose services are:",
+                    repo_root.display(),
+                    orphans.len()
+                );
+            }
+            orphans
         }
-        Some(c) => {
-            // Everything that goes down together, so the confirmation can name
-            // it all before the user commits to it.
-            let targets = compose::stop_set(&c.id, &c.name)?;
-            print!("{}", project_confirm_prompt(&targets, &repo_root));
-            std::io::Write::flush(&mut std::io::stdout())?;
-            let answer = read_answer(&mut std::io::stdin().lock())?;
-            if !confirmed(&answer) {
-                println!("{}", cancel_message(targets.len()));
-                return Ok(());
-            }
-            println!("{}", stopping_message(&targets, &repo_root));
-            let ids: Vec<String> = targets.iter().map(|m| m.id.clone()).collect();
-            // docker's SIGTERM grace is 10s per container before SIGKILL, and
-            // they are stopped in sequence, so the budget scales with the count
-            // rather than assuming one.
-            let budget = Duration::from_secs(30 * ids.len() as u64);
-            let res = run(&stop_argv(&ids), budget, StderrMode::Capture)?;
-            if res.timed_out {
-                return Err(Error::DockerCommandFailed {
-                    detail: format!("docker stop timed out after {}s", budget.as_secs()),
-                });
-            }
-            classify_stop(&ids, &res)?;
-            println!("stopped.");
-            Ok(())
+    };
+    if targets.is_empty() {
+        println!("no running dev container for {}", repo_root.display());
+        return Ok(());
+    }
+
+    print!("{}", project_confirm_prompt(&targets, &repo_root));
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let answer = read_answer(&mut std::io::stdin().lock())?;
+    if !confirmed(&answer) {
+        println!("{}", cancel_message(targets.len()));
+        return Ok(());
+    }
+    println!("{}", stopping_message(&targets, &repo_root));
+
+    // Two calls, not one argv: docker stops the containers named in a single
+    // call in parallel, so passing them together would SIGTERM the database at
+    // the same instant as the dev container still talking to it. The dev
+    // container goes first and is waited on — that is the point of ordering,
+    // and the direction Compose shuts a project down in.
+    let (dev, rest) = targets.split_at(1);
+    let mut detail = String::new();
+    for phase in [dev, rest] {
+        if phase.is_empty() {
+            continue;
+        }
+        let ids: Vec<String> = phase.iter().map(|m| m.id.clone()).collect();
+        let res = stop_call(&ids)?;
+        if res.timed_out {
+            detail.push_str(&format!(
+                "docker stop timed out after {STOP_TIMEOUT_SECS}s; "
+            ));
+        } else if res.exit_code != Some(0) {
+            detail.push_str(&tail(res.stderr.trim(), 500));
+            detail.push_str("; ");
         }
     }
+    // Asked of docker, after the fact: a timeout kills the CLI without telling
+    // us what landed, and a container that stopped is stopped whether or not
+    // docker's output said so.
+    verify_stopped(&targets, detail)?;
+    println!("stopped.");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -325,56 +354,20 @@ mod tests {
         );
     }
 
-    fn res(code: i32, stdout: &str, stderr: &str) -> crate::run::RunResult {
-        crate::run::RunResult {
-            exit_code: Some(code),
-            stdout: stdout.to_string(),
-            stdout_incomplete: false,
-            stderr: stderr.to_string(),
-            timed_out: false,
-        }
-    }
-
+    // What used to be inferred from `docker stop`'s prose is now asked of
+    // docker directly, so that behavior is covered by the docker-gated
+    // integration test rather than by string-matching unit tests. What belongs
+    // here is the pure part: the error names the containers still running, so
+    // a partial stop cannot be mistaken for a completed one.
     #[test]
-    fn every_container_stopping_is_a_success() {
-        let ids = ["a".to_string(), "b".to_string()];
-        assert!(classify_stop(&ids, &res(0, "a\nb\n", "")).is_ok());
-    }
-
-    // A container that is already gone is the outcome the user wanted, so it
-    // does not become an error just because docker had nothing to do.
-    #[test]
-    fn an_already_gone_container_is_not_a_failure() {
-        let ids = ["a".to_string(), "b".to_string()];
-        let r = res(
-            1,
-            "a\n",
-            "Error response from daemon: No such container: b\n",
-        );
-        assert!(classify_stop(&ids, &r).is_ok());
-    }
-
-    // The failure that matters: some stopped, one did not, and the user is
-    // walking away believing the project is down. The error has to name the
-    // container still running — reporting "stopped." here would be the same
-    // lie-by-omission the discovery fix was about.
-    #[test]
-    fn a_container_that_would_not_stop_is_named() {
-        let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
-        let r = res(
-            1,
-            "a\nc\n",
-            "Error response from daemon: cannot stop container b: permission denied\n",
-        );
-        let err = classify_stop(&ids, &r).unwrap_err();
+    fn a_container_left_running_is_named_in_the_error() {
+        let err = Error::ContainersNotStopped {
+            ids: vec!["dh_devcontainer-postgres-1".to_string()],
+            detail: "cannot stop container: permission denied".to_string(),
+        };
         let msg = err.to_string();
-        assert!(
-            msg.contains('b'),
-            "{msg} must name the container left running"
-        );
+        assert!(msg.contains("dh_devcontainer-postgres-1"), "{msg}");
         assert!(msg.contains("permission denied"), "{msg}");
-        // Do not accuse the ones that did stop.
-        assert!(!msg.contains("\"a\""), "{msg}");
     }
 
     #[test]

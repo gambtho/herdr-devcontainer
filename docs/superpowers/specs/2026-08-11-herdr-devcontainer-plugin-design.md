@@ -494,3 +494,62 @@ Docker ANDs repeated `--filter label` arguments, so this is a second `docker ps`
 whose results are unioned and collapsed by container id — without the dedupe, a
 CLI-created container matching both keys would look like two running containers
 and trip the refuse-to-choose error.
+
+## Amendment (2026-08-13, compose-aware stop)
+
+**Stop targets the Compose project, not one service.** The design above stops
+"the container" — a single `docker stop <id>` against the one container
+discovery matched. For a Compose-based Dev Container that is one service of
+several: stopping `double-holo-ui` took down its app and left postgres, redis,
+gotrue, supabase-gateway, and inbucket running. The Dev Container spec says the
+same thing the user expects — `shutdownAction` defaults to `stopCompose` for
+Compose configs — and it is what VS Code does on disconnect.
+
+Membership is read from the container's own `com.docker.compose.project` label.
+Compose writes that label at creation and locates its own containers by it, so
+the labels are the authority. Deriving the project name from `devcontainer.json`
+was rejected for the same reason `remoteEnv` was: it would re-implement a value
+another tool already computed, and would be wrong wherever the two disagree.
+
+`docker stop <id>...` rather than `docker compose stop`. Preflight verifies
+`docker` and nothing else; `docker compose` is a separate plugin that may be
+absent or v1, and discovery already produced the ids.
+
+The Dev Container's own service is stopped first, in **its own `docker stop`
+call**, and waited on before the rest go down. This detail was learned the
+expensive way: `docker stop a b c` stops the named containers in *parallel* —
+argument order only controls the order results print. Measured on docker 29.7.2
+with two containers that ignore SIGTERM, `docker stop a b` took 12.9s, one grace
+window rather than two. So an ordered argument list bought nothing: the database
+received SIGTERM at the same instant as the Dev Container still holding
+connections to it. Two calls deliver what one ordered call only appeared to.
+The cost is bounded — each call is one grace window, so the budget is a flat 30s
+per call rather than scaling with the number of services. Deeper ordering
+through `com.docker.compose.depends_on` is still not attempted: in a Dev
+Container project every other service is a dependency of the Dev Container, so
+one level is the whole ordering.
+
+One-off containers are excluded. `docker compose run` tags them
+`com.docker.compose.oneoff=True` and `docker compose stop` leaves them alone;
+sweeping them in would kill a `docker compose run --rm app pytest` a developer
+is watching in another pane. Docker has no negated label filter, so the row is
+dropped after parsing — and a row whose oneoff label is *missing* is kept, since
+an absent label is not a claim.
+
+Three consequences follow from stop becoming more destructive:
+
+- The confirmation names every container, by service, name, and id, rather than
+  counting them. It is the only thing between a mis-keyed binding and a stopped
+  database, so the list has to be readable at a glance. A single-container repo
+  renders exactly as it did before; nothing about it changed.
+- Whether the stop worked is **asked of docker**, not inferred from
+  `docker stop`'s output. Reading its stdout and pattern-matching its stderr for
+  "no such container" meant deciding whether someone's database was down by
+  matching English prose — and on timeout the CLI is killed, so its output says
+  nothing at all about what landed. A follow-up `docker ps` filtered to exactly
+  the target ids answers directly; anything still running is named in the error.
+- An absent Dev Container no longer implies an absent project. The app container
+  can exit on its own — a crash, an OOM kill, a stop from another pane — while
+  postgres and redis keep running. Reporting "no running dev container" there is
+  the same false absence in mirror image, so the project is checked from the
+  exited container's own label, and its survivors are offered for stopping.
