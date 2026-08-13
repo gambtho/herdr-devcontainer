@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::Error;
@@ -12,16 +12,36 @@ pub struct Container {
     pub state: String,
 }
 
-pub fn ps_argv(repo_root: &Path) -> Vec<String> {
+fn ps_argv_for(label_filter: String) -> Vec<String> {
     vec![
         "docker".to_string(),
         "ps".to_string(),
         "-a".to_string(),
         "--filter".to_string(),
-        format!("label=devcontainer.local_folder={}", repo_root.display()),
+        label_filter,
         "--format".to_string(),
         "{{.ID}}\t{{.Names}}\t{{.State}}".to_string(),
     ]
+}
+
+pub fn ps_argv(repo_root: &Path) -> Vec<String> {
+    ps_argv_for(format!(
+        "label=devcontainer.local_folder={}",
+        repo_root.display()
+    ))
+}
+
+/// The second discovery key. `devcontainer.local_folder` is written by whoever
+/// *created* the container, and VS Code on Windows writes it as a UNC path
+/// (`\\wsl.localhost\Ubuntu\home\u\repo`) that no POSIX repo root can equal.
+/// `devcontainer.config_file` on that same container is POSIX, because the CLI
+/// resolves it from inside WSL — so this stays an exact-match lookup instead of
+/// guessing at the host's path rendering.
+pub fn ps_argv_for_config_file(config_file: &Path) -> Vec<String> {
+    ps_argv_for(format!(
+        "label=devcontainer.config_file={}",
+        config_file.display()
+    ))
 }
 
 pub fn parse_ps(stdout: &str) -> Result<Vec<Container>, Error> {
@@ -47,6 +67,18 @@ pub fn parse_ps(stdout: &str) -> Result<Vec<Container>, Error> {
     Ok(out)
 }
 
+/// Both lookups can return the same container — a container the plugin created
+/// matches on `local_folder` *and* `config_file`. Collapsing by id keeps that
+/// from looking like two running containers, which `select_running` would
+/// (correctly, given what it was told) refuse to choose between.
+pub fn dedupe_by_id(containers: Vec<Container>) -> Vec<Container> {
+    let mut seen = std::collections::HashSet::new();
+    containers
+        .into_iter()
+        .filter(|c| seen.insert(c.id.clone()))
+        .collect()
+}
+
 pub fn select_running(
     containers: &[Container],
     repo_root: &Path,
@@ -65,18 +97,28 @@ pub fn select_running(
     }
 }
 
-pub fn list(repo_root: &Path) -> Result<Vec<Container>, Error> {
-    let res = run(
-        &ps_argv(repo_root),
-        Duration::from_secs(5),
-        StderrMode::Capture,
-    )?;
-    if res.exit_code != Some(0) {
-        return Err(Error::DockerCommandFailed {
-            detail: tail(res.stderr.trim(), 500),
-        });
+/// Every container that could belong to `repo_root`, looked up under both
+/// identity labels.
+///
+/// Two `docker ps` calls rather than one: docker ANDs repeated `--filter label`
+/// arguments, so a single call asking for both labels would match only
+/// containers carrying both values — the opposite of what is needed. Results
+/// are unioned and collapsed by id.
+pub fn list(repo_root: &Path, config_files: &[PathBuf]) -> Result<Vec<Container>, Error> {
+    let mut argvs = vec![ps_argv(repo_root)];
+    argvs.extend(config_files.iter().map(|p| ps_argv_for_config_file(p)));
+
+    let mut all = Vec::new();
+    for argv in &argvs {
+        let res = run(argv, Duration::from_secs(5), StderrMode::Capture)?;
+        if res.exit_code != Some(0) {
+            return Err(Error::DockerCommandFailed {
+                detail: tail(res.stderr.trim(), 500),
+            });
+        }
+        all.extend(parse_ps(&res.stdout)?);
     }
-    parse_ps(&res.stdout)
+    Ok(dedupe_by_id(all))
 }
 
 #[cfg(test)]
@@ -98,6 +140,21 @@ mod tests {
         assert!(argv.contains(&"label=devcontainer.local_folder=/r".to_string()));
         assert!(argv.contains(&"-a".to_string()));
         // The spec's stop output prints id *and* name, so name must be queried.
+        assert!(argv.contains(&"{{.ID}}\t{{.Names}}\t{{.State}}".to_string()));
+    }
+
+    // VS Code on Windows writes `local_folder` as a UNC path
+    // (`\\wsl.localhost\Ubuntu\home\u\repo`) while we compute a POSIX root, so
+    // that label alone cannot find a container VS Code created. `config_file`
+    // on the same container is POSIX, because the CLI writes it from inside
+    // WSL, which makes it a second exact-match key rather than a path guess.
+    #[test]
+    fn ps_argv_for_config_file_filters_by_the_config_file_label() {
+        let argv = ps_argv_for_config_file(Path::new("/r/.devcontainer/devcontainer.json"));
+        assert!(argv
+            .contains(&"label=devcontainer.config_file=/r/.devcontainer/devcontainer.json"
+                .to_string()));
+        assert!(argv.contains(&"-a".to_string()));
         assert!(argv.contains(&"{{.ID}}\t{{.Names}}\t{{.State}}".to_string()));
     }
 
@@ -128,6 +185,20 @@ mod tests {
     fn parse_ps_accepts_empty_output() {
         assert_eq!(parse_ps("").unwrap(), vec![]);
         assert_eq!(parse_ps("\n\n").unwrap(), vec![]);
+    }
+
+    // A plugin-created container carries a matching value under *both* labels,
+    // so the two lookups return the same row twice. Left un-deduped that reads
+    // as two running containers, and `select_running` would refuse to choose —
+    // turning the fix into a hard error on the containers that already worked.
+    #[test]
+    fn dedupe_keeps_the_first_of_each_id() {
+        let merged = dedupe_by_id(vec![
+            c("a", "an", "running"),
+            c("b", "bn", "exited"),
+            c("a", "an", "running"),
+        ]);
+        assert_eq!(merged, vec![c("a", "an", "running"), c("b", "bn", "exited")]);
     }
 
     #[test]

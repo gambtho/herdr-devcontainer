@@ -46,13 +46,29 @@ fn read_answer(reader: &mut impl std::io::BufRead) -> Result<String, Error> {
     Ok(buf)
 }
 
+/// The config paths to look a container up by, honouring a repo-configured
+/// `config` when it resolves.
+///
+/// Best-effort by design: this list is a *search*, not an authorization
+/// decision, so a `config` value that cannot be resolved falls back to the
+/// standard locations instead of failing the stop. Refusing here would take
+/// away the `local_folder` lookup too — turning a bad config line into "no
+/// container found" for a container that is plainly running.
+fn discovery_config_files(repo_root: &Path) -> Vec<std::path::PathBuf> {
+    let configured = crate::config::load()
+        .ok()
+        .and_then(|cfg| cfg.repo(repo_root).config)
+        .and_then(|rel| crate::config::resolve_repo_relative(repo_root, &rel).ok());
+    crate::detect::config_candidates(repo_root, configured.as_deref())
+}
+
 pub fn run_stop() -> Result<(), Error> {
     let ctx = context::load_context();
     let process_cwd = std::env::current_dir()?;
     let repo_root = context::resolve_repo_root(&ctx, &process_cwd)?;
     preflight::check_docker("docker")?;
 
-    let containers = discover::list(&repo_root)?;
+    let containers = discover::list(&repo_root, &discovery_config_files(&repo_root))?;
     match discover::select_running(&containers, &repo_root)? {
         None => {
             println!("no running dev container for {}", repo_root.display());

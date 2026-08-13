@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use herdr_devcontainer::{exec, preflight, shell, up};
+use herdr_devcontainer::{detect, discover, exec, preflight, shell, up};
 
 fn sh_ok(dir: &Path, cmd: &str, args: &[&str]) {
     let status = Command::new(cmd)
@@ -58,6 +58,61 @@ fn fixture_repo(tmp: &Path) -> std::path::PathBuf {
     .unwrap();
     sh_ok(&repo, "git", &["init", "-b", "main"]);
     repo
+}
+
+/// A container labelled the way VS Code on Windows labels one: `local_folder`
+/// holds the host's UNC rendering of the WSL path, which no POSIX repo root can
+/// equal, while `config_file` holds the POSIX path the CLI resolved inside WSL.
+/// Discovery keyed only on `local_folder` reports "no container" for a
+/// container that is running in front of the user — the reported regression.
+#[test]
+#[ignore = "requires docker"]
+fn a_container_labelled_by_vs_code_on_windows_is_still_found() {
+    preflight::check_docker("docker").expect("docker daemon");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = fixture_repo(tmp.path());
+    let repo = repo.canonicalize().unwrap();
+    let config_file = repo.join(".devcontainer/devcontainer.json");
+
+    let out = Command::new("docker")
+        .args(["run", "-d", "--rm", "--label"])
+        // Deliberately unrelated to `repo`: the whole point is that this value
+        // cannot be derived from the POSIX root we compute.
+        .arg("devcontainer.local_folder=\\\\wsl.localhost\\Ubuntu\\home\\u\\elsewhere")
+        .arg("--label")
+        .arg(format!("devcontainer.config_file={}", config_file.display()))
+        .args(["alpine:3.20", "sleep", "300"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "docker run failed");
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    struct Rm(String);
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", &self.0]).status();
+        }
+    }
+    let _cleanup = Rm(id.clone());
+
+    // Guards this test's own honesty: with no config candidates, discovery is
+    // exactly what it was before the fix, and must find nothing. If this ever
+    // starts finding the container, the test below stopped proving anything.
+    let by_folder_only = discover::list(&repo, &[]).expect("docker ps");
+    assert!(
+        by_folder_only.is_empty(),
+        "local_folder alone should not match a UNC-labelled container, got {by_folder_only:?}"
+    );
+
+    let candidates = detect::config_candidates(&repo, None);
+    let found = discover::list(&repo, &candidates).expect("docker ps");
+    let running = discover::select_running(&found, &repo).expect("unambiguous");
+    let running = running.expect("the running container must be discoverable");
+    assert!(
+        id.starts_with(&running.id),
+        "found {} but the container is {id}",
+        running.id
+    );
 }
 
 #[test]

@@ -30,7 +30,8 @@ pub fn run_pane(shell: bool) -> Result<(), Error> {
     preflight::check_docker("docker")?;
 
     // Before taking the lock or starting anything: refuse an ambiguous repo.
-    check_unambiguous(&discover::list(&repo_root)?, &repo_root)?;
+    let config_files = detect::config_candidates(&repo_root, detection.config_arg.as_deref());
+    check_unambiguous(&discover::list(&repo_root, &config_files)?, &repo_root)?;
 
     let up_result = {
         let _lock = lockfile::acquire(&repo_root)?;
