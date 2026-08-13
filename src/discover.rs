@@ -71,11 +71,30 @@ pub fn parse_ps(stdout: &str) -> Result<Vec<Container>, Error> {
 /// matches on `local_folder` *and* `config_file`. Collapsing by id keeps that
 /// from looking like two running containers, which `select_running` would
 /// (correctly, given what it was told) refuse to choose between.
+///
+/// The lookups are sequential, so the same container can be reported with
+/// different states: one can start or stop between the two `docker ps` calls.
+/// A disagreement resolves toward `running`, because the other direction would
+/// report an absence we already hold evidence against.
 pub fn dedupe_by_id(containers: Vec<Container>) -> Vec<Container> {
-    let mut seen = std::collections::HashSet::new();
-    containers
+    let mut order: Vec<String> = Vec::new();
+    let mut by_id: std::collections::HashMap<String, Container> = std::collections::HashMap::new();
+    for c in containers {
+        match by_id.get_mut(&c.id) {
+            Some(existing) => {
+                if c.state == "running" {
+                    existing.state = c.state;
+                }
+            }
+            None => {
+                order.push(c.id.clone());
+                by_id.insert(c.id.clone(), c);
+            }
+        }
+    }
+    order
         .into_iter()
-        .filter(|c| seen.insert(c.id.clone()))
+        .filter_map(|id| by_id.remove(&id))
         .collect()
 }
 
@@ -97,6 +116,41 @@ pub fn select_running(
     }
 }
 
+const PS_TIMEOUT_SECS: u64 = 5;
+
+/// Classify one `docker ps` outcome.
+///
+/// A timeout is reported as a timeout: `run` kills the process group, so the
+/// exit code is `None` and the generic branch below would otherwise render it
+/// as a bare "docker command failed" with an empty detail. `shell::probe`
+/// distinguishes the two the same way.
+fn check_ps_result(res: &crate::run::RunResult) -> Result<(), Error> {
+    if res.timed_out {
+        return Err(Error::DockerCommandFailed {
+            detail: format!("docker ps timed out after {PS_TIMEOUT_SECS}s"),
+        });
+    }
+    if res.exit_code != Some(0) {
+        return Err(Error::DockerCommandFailed {
+            detail: tail(res.stderr.trim(), 500),
+        });
+    }
+    Ok(())
+}
+
+/// Every `docker ps` this lookup needs: the `local_folder` key, plus one
+/// `config_file` key per candidate config path.
+///
+/// Split out from `list` so the union is provable without a docker daemon.
+/// Folded into `list`, the wiring could be deleted with every unit test still
+/// green — the pieces were each tested alone, which is not the same as testing
+/// that they are connected.
+fn list_argvs(repo_root: &Path, config_files: &[PathBuf]) -> Vec<Vec<String>> {
+    let mut argvs = vec![ps_argv(repo_root)];
+    argvs.extend(config_files.iter().map(|p| ps_argv_for_config_file(p)));
+    argvs
+}
+
 /// Every container that could belong to `repo_root`, looked up under both
 /// identity labels.
 ///
@@ -105,17 +159,14 @@ pub fn select_running(
 /// containers carrying both values — the opposite of what is needed. Results
 /// are unioned and collapsed by id.
 pub fn list(repo_root: &Path, config_files: &[PathBuf]) -> Result<Vec<Container>, Error> {
-    let mut argvs = vec![ps_argv(repo_root)];
-    argvs.extend(config_files.iter().map(|p| ps_argv_for_config_file(p)));
-
     let mut all = Vec::new();
-    for argv in &argvs {
-        let res = run(argv, Duration::from_secs(5), StderrMode::Capture)?;
-        if res.exit_code != Some(0) {
-            return Err(Error::DockerCommandFailed {
-                detail: tail(res.stderr.trim(), 500),
-            });
-        }
+    for argv in &list_argvs(repo_root, config_files) {
+        let res = run(
+            argv,
+            Duration::from_secs(PS_TIMEOUT_SECS),
+            StderrMode::Capture,
+        )?;
+        check_ps_result(&res)?;
         all.extend(parse_ps(&res.stdout)?);
     }
     Ok(dedupe_by_id(all))
@@ -132,6 +183,60 @@ mod tests {
             name: name.to_string(),
             state: state.to_string(),
         }
+    }
+
+    // A killed process reports no exit code, so the generic branch renders a
+    // timeout as "docker command failed" with an empty detail — nothing the
+    // user can act on. This path now runs up to three times per invocation, so
+    // the uninformative version costs three timeouts to reach.
+    #[test]
+    fn a_timed_out_ps_says_so_rather_than_failing_blankly() {
+        let res = crate::run::RunResult {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
+        };
+        let err = check_ps_result(&res).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "{msg}");
+        assert!(msg.contains('5'), "{msg} should name the budget");
+    }
+
+    #[test]
+    fn a_failed_ps_carries_its_stderr() {
+        let res = crate::run::RunResult {
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: "permission denied while trying to connect".to_string(),
+            timed_out: false,
+        };
+        let err = check_ps_result(&res).unwrap_err();
+        assert!(err.to_string().contains("permission denied"));
+    }
+
+    // The fix's actual decision is "one `docker ps` per config file, unioned
+    // with the local_folder lookup". Tested here rather than only inside the
+    // docker-gated integration test, because deleting the wiring left every
+    // other unit test green — each piece was proven in isolation while nothing
+    // proved they were connected.
+    #[test]
+    fn list_queries_the_folder_label_and_every_config_file() {
+        let argvs = list_argvs(
+            Path::new("/r"),
+            &[
+                PathBuf::from("/r/.devcontainer/devcontainer.json"),
+                PathBuf::from("/r/.devcontainer.json"),
+            ],
+        );
+        assert_eq!(argvs.len(), 3, "one folder lookup plus one per config file");
+        assert!(argvs[0].contains(&"label=devcontainer.local_folder=/r".to_string()));
+        assert!(argvs[1].contains(
+            &"label=devcontainer.config_file=/r/.devcontainer/devcontainer.json".to_string()
+        ));
+        assert!(
+            argvs[2].contains(&"label=devcontainer.config_file=/r/.devcontainer.json".to_string())
+        );
     }
 
     #[test]
@@ -151,9 +256,9 @@ mod tests {
     #[test]
     fn ps_argv_for_config_file_filters_by_the_config_file_label() {
         let argv = ps_argv_for_config_file(Path::new("/r/.devcontainer/devcontainer.json"));
-        assert!(argv
-            .contains(&"label=devcontainer.config_file=/r/.devcontainer/devcontainer.json"
-                .to_string()));
+        assert!(argv.contains(
+            &"label=devcontainer.config_file=/r/.devcontainer/devcontainer.json".to_string()
+        ));
         assert!(argv.contains(&"-a".to_string()));
         assert!(argv.contains(&"{{.ID}}\t{{.Names}}\t{{.State}}".to_string()));
     }
@@ -191,6 +296,21 @@ mod tests {
     // so the two lookups return the same row twice. Left un-deduped that reads
     // as two running containers, and `select_running` would refuse to choose —
     // turning the fix into a hard error on the containers that already worked.
+    // The two lookups are sequential, not atomic, so one container can appear
+    // in both with different states — another pane's `devcontainer up` can
+    // finish between them. Keeping the first-seen row would retain the stale
+    // `exited` one and report "no running dev container" for a container that
+    // started while we were asking. Resolve the disagreement toward running:
+    // the alternative is asserting an absence we have evidence against.
+    #[test]
+    fn dedupe_prefers_a_running_row_over_a_stale_one() {
+        let merged = dedupe_by_id(vec![c("a", "an", "exited"), c("a", "an", "running")]);
+        assert_eq!(merged, vec![c("a", "an", "running")]);
+        // ...and the order of the disagreement must not matter.
+        let merged = dedupe_by_id(vec![c("a", "an", "running"), c("a", "an", "exited")]);
+        assert_eq!(merged, vec![c("a", "an", "running")]);
+    }
+
     #[test]
     fn dedupe_keeps_the_first_of_each_id() {
         let merged = dedupe_by_id(vec![
@@ -198,7 +318,10 @@ mod tests {
             c("b", "bn", "exited"),
             c("a", "an", "running"),
         ]);
-        assert_eq!(merged, vec![c("a", "an", "running"), c("b", "bn", "exited")]);
+        assert_eq!(
+            merged,
+            vec![c("a", "an", "running"), c("b", "bn", "exited")]
+        );
     }
 
     #[test]

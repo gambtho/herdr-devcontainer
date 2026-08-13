@@ -81,7 +81,10 @@ fn a_container_labelled_by_vs_code_on_windows_is_still_found() {
         // cannot be derived from the POSIX root we compute.
         .arg("devcontainer.local_folder=\\\\wsl.localhost\\Ubuntu\\home\\u\\elsewhere")
         .arg("--label")
-        .arg(format!("devcontainer.config_file={}", config_file.display()))
+        .arg(format!(
+            "devcontainer.config_file={}",
+            config_file.display()
+        ))
         .args(["alpine:3.20", "sleep", "300"])
         .output()
         .unwrap();

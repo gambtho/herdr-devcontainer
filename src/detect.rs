@@ -22,13 +22,25 @@ pub fn config_candidates(repo_root: &Path, config_arg: Option<&Path>) -> Vec<Pat
     }
 }
 
+/// Resolve a repo-configured `config` to an absolute path, rejecting one that
+/// escapes the repo.
+///
+/// Shared with `stop`, which needs the same value for discovery but must not
+/// run the rest of `detect` — a repo with `enabled = "false"` still has a
+/// container worth stopping. Two independent derivations would eventually
+/// drift, and a `stop` looking up a path no container's label holds is exactly
+/// the "no running dev container" failure this discovery path exists to fix.
+pub fn resolve_config_arg(repo_root: &Path, rc: &RepoConfig) -> Result<Option<PathBuf>, Error> {
+    match rc.config.as_deref() {
+        Some(rel) => Ok(Some(crate::config::resolve_repo_relative(repo_root, rel)?)),
+        None => Ok(None),
+    }
+}
+
 pub fn detect(repo_root: &Path, rc: &RepoConfig) -> Result<Detection, Error> {
     // Validate before branching on `enabled`: `True` skips the stat, so a check
     // placed later would let an escaping path through in that mode.
-    let config_arg = match rc.config.as_deref() {
-        Some(rel) => Some(crate::config::resolve_repo_relative(repo_root, rel)?),
-        None => None,
-    };
+    let config_arg = resolve_config_arg(repo_root, rc)?;
     match rc.enabled {
         Enabled::False => Err(Error::DisabledByConfig {
             repo_root: repo_root.display().to_string(),
