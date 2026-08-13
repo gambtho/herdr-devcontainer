@@ -199,6 +199,10 @@ pub fn stop_set(dev_id: &str, dev_name: &str) -> Result<Vec<Member>, Error> {
 /// stop reports "no running dev container" and walks the user away from a live
 /// project: the same false absence this discovery path exists to prevent, just
 /// arrived at from the other side.
+///
+/// Returned in `docker ps` order, *not* dev-container-first — there is no dev
+/// container running to lead with. Callers must not apply `stop_set`'s
+/// "first element leads" convention to this result.
 pub fn orphaned_members(candidates: &[crate::discover::Container]) -> Result<Vec<Member>, Error> {
     for c in candidates {
         let Some(project) = project_of(&c.id)? else {

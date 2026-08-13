@@ -44,7 +44,9 @@ fn verify_stopped(targets: &[compose::Member], stop_detail: String) -> Result<()
         return Ok(());
     }
     Err(Error::ContainersNotStopped {
-        ids: alive.iter().map(|m| m.name.clone()).collect(),
+        // Names, not ids: this is what the user reads when six containers were
+        // named in the prompt and one is still up. `docker stop` takes either.
+        names: alive.iter().map(|m| m.name.clone()).collect(),
         detail: stop_detail,
     })
 }
@@ -194,6 +196,10 @@ pub fn run_stop() -> Result<(), Error> {
     let config_files = discovery_config_files(&repo_root, &cfg.repo(&repo_root))?;
 
     let containers = discover::list(&repo_root, &config_files)?;
+    // Whether the first target is the dev container. Only then is there an
+    // ordering worth paying a second grace window for; the orphan path below
+    // returns survivors in docker's order, where "first" means nothing.
+    let mut dev_leads = true;
     let targets = match discover::select_running(&containers, &repo_root)? {
         // Everything that goes down together, so the confirmation can name it
         // all before the user commits to it.
@@ -202,6 +208,7 @@ pub fn run_stop() -> Result<(), Error> {
         // be. Saying "no running dev container" while postgres serves is the
         // same false absence this path exists to prevent.
         None => {
+            dev_leads = false;
             let orphans = compose::orphaned_members(&containers)?;
             if !orphans.is_empty() {
                 println!(
@@ -232,9 +239,17 @@ pub fn run_stop() -> Result<(), Error> {
     // the same instant as the dev container still talking to it. The dev
     // container goes first and is waited on — that is the point of ordering,
     // and the direction Compose shuts a project down in.
-    let (dev, rest) = targets.split_at(1);
+    //
+    // With no dev container to lead, there is nothing to order around: the
+    // survivors go down together rather than paying a second grace window to
+    // sequence one arbitrary service ahead of the others.
+    let (first, rest) = if dev_leads {
+        targets.split_at(1)
+    } else {
+        targets.split_at(0)
+    };
     let mut detail = String::new();
-    for phase in [dev, rest] {
+    for phase in [first, rest] {
         if phase.is_empty() {
             continue;
         }
@@ -362,7 +377,7 @@ mod tests {
     #[test]
     fn a_container_left_running_is_named_in_the_error() {
         let err = Error::ContainersNotStopped {
-            ids: vec!["dh_devcontainer-postgres-1".to_string()],
+            names: vec!["dh_devcontainer-postgres-1".to_string()],
             detail: "cannot stop container: permission denied".to_string(),
         };
         let msg = err.to_string();

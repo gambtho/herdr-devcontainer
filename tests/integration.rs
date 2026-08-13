@@ -65,6 +65,45 @@ fn fixture_repo(tmp: &Path) -> std::path::PathBuf {
 /// equal, while `config_file` holds the POSIX path the CLI resolved inside WSL.
 /// Discovery keyed only on `local_folder` reports "no container" for a
 /// container that is running in front of the user — the reported regression.
+/// Removes every container of a Compose project fixture, so a failed assertion
+/// unwinds without leaving containers on the host.
+struct RemoveProject(&'static str);
+
+impl Drop for RemoveProject {
+    fn drop(&mut self) {
+        let Ok(out) = Command::new("docker")
+            .args([
+                "ps",
+                "-aq",
+                "--filter",
+                &format!("label=com.docker.compose.project={}", self.0),
+            ])
+            .output()
+        else {
+            return;
+        };
+        for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+            let _ = Command::new("docker").args(["rm", "-f", id]).status();
+        }
+    }
+}
+
+/// Starts one labelled member of a Compose project fixture, returning its short
+/// id.
+fn compose_member(project: &str, service: &str, cmd: &str) -> String {
+    let out = Command::new("docker")
+        .args(["run", "-d", "--label"])
+        .arg(format!("com.docker.compose.project={project}"))
+        .arg("--label")
+        .arg(format!("com.docker.compose.service={service}"))
+        .args(["--name", &format!("{project}-{service}-1")])
+        .args(["alpine:3.20", "sh", "-c", cmd])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "docker run {service} failed");
+    String::from_utf8_lossy(&out.stdout).trim()[..12].to_string()
+}
+
 /// The app container exits on its own — a crash, an OOM kill, a stop from
 /// another pane — while its services keep running. Reporting "no running dev
 /// container" then walks the user away from a live database.
@@ -74,63 +113,35 @@ fn an_exited_dev_container_does_not_hide_its_running_services() {
     preflight::check_docker("docker").expect("docker daemon");
 
     let project = "herdrdevc_orphan_fixture";
-    struct Down(&'static str);
-    impl Drop for Down {
-        fn drop(&mut self) {
-            let Ok(out) = Command::new("docker")
-                .args([
-                    "ps",
-                    "-aq",
-                    "--filter",
-                    &format!("label=com.docker.compose.project={}", self.0),
-                ])
-                .output()
-            else {
-                return;
-            };
-            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                let _ = Command::new("docker").args(["rm", "-f", id]).status();
-            }
-        }
-    }
-    let _cleanup = Down(project);
+    let _cleanup = RemoveProject(project);
 
-    let member = |service: &str, cmd: &str| -> String {
-        let out = Command::new("docker")
-            .args(["run", "-d", "--label"])
-            .arg(format!("com.docker.compose.project={project}"))
-            .arg("--label")
-            .arg(format!("com.docker.compose.service={service}"))
-            .args(["--name", &format!("{project}-{service}-1")])
-            .args(["alpine:3.20", "sh", "-c", cmd])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "docker run {service} failed");
-        String::from_utf8_lossy(&out.stdout).trim()[..12].to_string()
-    };
     // The app exits immediately; the db keeps running.
-    let app = member("app", "exit 0");
-    let db = member("db", "sleep 300");
+    let app = compose_member(project, "app", "exit 0");
+    let db = compose_member(project, "db", "sleep 300");
 
-    // Wait for the app to actually be gone before asserting on it.
+    // Wait for the app to actually be gone before asserting on it. A silent
+    // fall-through here would make a slow fixture look like a discovery bug.
+    let mut exited = false;
     for _ in 0..50 {
         let out = Command::new("docker")
             .args(["inspect", "-f", "{{.State.Running}}", &app])
             .output()
             .unwrap();
         if String::from_utf8_lossy(&out.stdout).trim() == "false" {
+            exited = true;
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    assert!(exited, "fixture: the app container did not exit within 5s");
 
     // This is what discovery hands over: the dev container, exited.
-    let exited = vec![discover::Container {
+    let exited_container = vec![discover::Container {
         id: app.clone(),
         name: format!("{project}-app-1"),
         state: "exited".to_string(),
     }];
-    let orphans = compose::orphaned_members(&exited).expect("orphan lookup");
+    let orphans = compose::orphaned_members(&exited_container).expect("orphan lookup");
     assert_eq!(
         orphans.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         vec![db.as_str()],
@@ -149,45 +160,13 @@ fn stopping_a_compose_dev_container_stops_its_whole_project() {
     preflight::check_docker("docker").expect("docker daemon");
 
     let project = "herdrdevc_stopset_fixture";
-    struct Down(&'static str);
-    impl Drop for Down {
-        fn drop(&mut self) {
-            let Ok(out) = Command::new("docker")
-                .args([
-                    "ps",
-                    "-aq",
-                    "--filter",
-                    &format!("label=com.docker.compose.project={}", self.0),
-                ])
-                .output()
-            else {
-                return;
-            };
-            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-                let _ = Command::new("docker").args(["rm", "-f", id]).status();
-            }
-        }
-    }
-    let _cleanup = Down(project);
+    let _cleanup = RemoveProject(project);
 
     // Built with plain `docker run` rather than the compose CLI: the labels are
     // what the plugin reads, and this keeps the test to the one dependency the
     // plugin itself requires.
-    let run_member = |service: &str| -> String {
-        let out = Command::new("docker")
-            .args(["run", "-d", "--label"])
-            .arg(format!("com.docker.compose.project={project}"))
-            .arg("--label")
-            .arg(format!("com.docker.compose.service={service}"))
-            .args(["--name", &format!("{project}-{service}-1")])
-            .args(["alpine:3.20", "sleep", "300"])
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "docker run {service} failed");
-        String::from_utf8_lossy(&out.stdout).trim()[..12].to_string()
-    };
-    let app = run_member("app");
-    let db = run_member("db");
+    let app = compose_member(project, "app", "sleep 300");
+    let db = compose_member(project, "db", "sleep 300");
 
     let targets = compose::stop_set(&app, &format!("{project}-app-1")).expect("stop set");
     assert_eq!(targets.len(), 2, "both services belong to the stop set");
