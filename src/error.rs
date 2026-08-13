@@ -29,6 +29,8 @@ pub enum Error {
     MalformedDockerOutput { line: String },
     #[error("multiple running dev containers for {repo_root}; refusing to choose: {ids:?}")]
     MultipleRunningContainers { repo_root: String, ids: Vec<String> },
+    #[error("these containers did not stop: {names:?}\n{detail}")]
+    ContainersNotStopped { names: Vec<String>, detail: String },
     #[error("docker command failed: {detail}")]
     DockerCommandFailed { detail: String },
     #[error("{0}")]
@@ -60,6 +62,13 @@ impl Error {
             }
             Error::MultipleRunningContainers { .. } => {
                 Some("stop the extras with `docker stop <id>` and retry")
+            }
+            // Deliberately says nothing about the containers *not* listed. When
+            // docker never reached the daemon, every id lands here and nothing
+            // stopped — a hint claiming "the rest stopped" would then be a
+            // confident statement about a state we never observed.
+            Error::ContainersNotStopped { .. } => {
+                Some("stop them with `docker stop <name>`, or retry once docker is reachable")
             }
             _ => None,
         }
