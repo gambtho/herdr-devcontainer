@@ -225,6 +225,17 @@ label the Dev Containers CLI writes itself, and it means every linked worktree
 of a repository shares one Dev Container rather than racing to create
 independent ones that would collide on ports and similar resources.
 
+That label only matches when the CLI created the container. Labels are written
+once, at creation, and VS Code on Windows writes `local_folder` as the host's
+UNC view of the WSL path — `\\wsl.localhost\Ubuntu\home\you\repo` — which no
+POSIX repository root can equal. Nothing rewrites it afterward: Docker Compose
+reuses containers by its own project name, so a container VS Code created stays
+reachable through `devcontainer up` while carrying a label the plugin cannot
+match. Discovery therefore also looks containers up by `devcontainer.config_file`,
+which the CLI resolves from inside WSL and so holds a POSIX path on those same
+containers. Both are exact-match lookups; the plugin never guesses at how a host
+renders a path.
+
 That also defines the main limitation:
 
 > A linked worktree checked out **outside** the main repository directory is not
@@ -294,7 +305,8 @@ For a shell or command pane, the wrapper:
    to Git on the pane and process working directories;
 2. detects the repository's Dev Container configuration;
 3. verifies the Dev Containers CLI is on `PATH` and the Docker daemon answers;
-4. discovers existing containers by the `devcontainer.local_folder` label;
+4. discovers existing containers by the `devcontainer.local_folder` and
+   `devcontainer.config_file` labels;
 5. refuses to continue when more than one of them is running;
 6. acquires a per-repository lock;
 7. runs `devcontainer up` and validates its success result;

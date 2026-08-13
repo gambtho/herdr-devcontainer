@@ -46,13 +46,42 @@ fn read_answer(reader: &mut impl std::io::BufRead) -> Result<String, Error> {
     Ok(buf)
 }
 
+/// The config paths to look a container up by, honouring a repo-configured
+/// `config`.
+///
+/// A `config` that will not resolve is an error rather than a fallback to the
+/// standard locations. It named the only value a container's `config_file`
+/// label could hold, so silently searching narrower would end in "no running
+/// dev container" for a container that is plainly running — uncertainty
+/// reported as absence. Erroring here matches what the README already promises
+/// about an unreadable config, and what `detect` does on the pane path.
+fn discovery_config_files(
+    repo_root: &Path,
+    rc: &crate::config::RepoConfig,
+) -> Result<Vec<std::path::PathBuf>, Error> {
+    let configured = crate::detect::resolve_config_arg(repo_root, rc)?;
+    Ok(crate::detect::config_candidates(
+        repo_root,
+        configured.as_deref(),
+    ))
+}
+
 pub fn run_stop() -> Result<(), Error> {
     let ctx = context::load_context();
     let process_cwd = std::env::current_dir()?;
     let repo_root = context::resolve_repo_root(&ctx, &process_cwd)?;
     preflight::check_docker("docker")?;
 
-    let containers = discover::list(&repo_root)?;
+    // Not `detect::detect`: a repo with `enabled = "false"` still has a
+    // container worth stopping if one is somehow running, and refusing here
+    // would strand it.
+    let cfg = crate::config::load()?;
+    for warning in &cfg.warnings {
+        eprintln!("config: {warning}");
+    }
+    let config_files = discovery_config_files(&repo_root, &cfg.repo(&repo_root))?;
+
+    let containers = discover::list(&repo_root, &config_files)?;
     match discover::select_running(&containers, &repo_root)? {
         None => {
             println!("no running dev container for {}", repo_root.display());
@@ -89,6 +118,32 @@ pub fn run_stop() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A `config` we cannot resolve must not degrade into a narrower search. If
+    // it named the only path a container's `config_file` label could hold,
+    // quietly dropping it and reporting "no running dev container" would invert
+    // uncertainty into absence — the one thing this codebase refuses to do. The
+    // README says the same about config generally: an unreadable one is an
+    // error, not a silent fallback.
+    #[test]
+    fn an_unresolvable_custom_config_is_an_error_not_a_narrower_search() {
+        let rc = crate::config::RepoConfig {
+            config: Some("../escape/devc.json".to_string()),
+            ..crate::config::RepoConfig::default()
+        };
+        let err = discovery_config_files(std::path::Path::new("/r"), &rc).unwrap_err();
+        assert!(matches!(err, Error::InvalidConfigPath { .. }));
+    }
+
+    #[test]
+    fn a_resolvable_custom_config_is_the_only_lookup_path() {
+        let rc = crate::config::RepoConfig {
+            config: Some("alt/devc.json".to_string()),
+            ..crate::config::RepoConfig::default()
+        };
+        let got = discovery_config_files(std::path::Path::new("/r"), &rc).unwrap();
+        assert_eq!(got, vec![std::path::PathBuf::from("/r/alt/devc.json")]);
+    }
 
     #[test]
     fn stop_argv_targets_the_id() {

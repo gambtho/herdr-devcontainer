@@ -27,7 +27,7 @@ pub enum Error {
     UpOutputUnparseable { detail: String, last_line: String },
     #[error("could not parse `docker ps` output line: {line}")]
     MalformedDockerOutput { line: String },
-    #[error("multiple running dev containers carry label devcontainer.local_folder={repo_root}; refusing to choose: {ids:?}")]
+    #[error("multiple running dev containers for {repo_root}; refusing to choose: {ids:?}")]
     MultipleRunningContainers { repo_root: String, ids: Vec<String> },
     #[error("docker command failed: {detail}")]
     DockerCommandFailed { detail: String },
@@ -144,6 +144,26 @@ mod tests {
         .to_string();
         assert!(msg.contains("abc123 (foo_devcontainer)"), "{msg}");
         assert!(msg.contains("def456 (bar)"), "{msg}");
+    }
+
+    // Discovery is a union over two labels, so the containers named here need
+    // not share one. The case this error most often reports — a VS Code-created
+    // container beside a plugin-created one — is exactly the case where they do
+    // not: the first carries a UNC `local_folder`. Naming that label as if both
+    // carried it sends the user to a `docker ps --filter` that finds one
+    // container, and makes the tool look wrong when it is right.
+    #[test]
+    fn multiple_running_containers_do_not_claim_a_shared_label() {
+        let msg = Error::MultipleRunningContainers {
+            repo_root: "/r".into(),
+            ids: vec!["abc123 (foo)".into(), "def456 (bar)".into()],
+        }
+        .to_string();
+        assert!(msg.contains("/r"), "{msg} should name the repo");
+        assert!(
+            !msg.contains("devcontainer.local_folder"),
+            "{msg} asserts a label the containers may not carry"
+        );
     }
 
     #[test]

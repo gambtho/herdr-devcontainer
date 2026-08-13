@@ -98,7 +98,9 @@ needed is recorded here. Facts below were verified against herdr master
   of existing containers reuses the Dev Containers CLI's own label:
   `docker ps -a --filter label=devcontainer.local_folder=<repo-root>`.
   More than one *running* match is a hard error — refuse to choose
-  (`adapter.go:97-144`).
+  (`adapter.go:97-144`). **That single-label lookup was superseded after a
+  second round of real use — see [the 2026-08-13
+  amendment](#amendment-2026-08-13-second-regression-from-real-use).**
 - **Failure-mode details** (expensive to rediscover):
   - Docker error strings drift across versions — match case-insensitively
     (e.g. "no such object"; docker 29 lowercases it).
@@ -465,3 +467,30 @@ devcontainer.json with every Feature's metadata and the image's
 result — so parsing the config file alone was rejected as producing a partial
 environment that reads as authoritative. That is the same "uncertainty is never
 absence" rule this design applies elsewhere.
+
+## Amendment (2026-08-13, second regression from real use)
+
+**Discovery — `devcontainer.local_folder` is not always a POSIX path.** The
+design above reuses that label as the sole container identity, on the reasoning
+that it is "the Dev Containers CLI's own label." It is — but only when the CLI
+created the container. Labels are written once, at creation, and VS Code on
+Windows creates them with `local_folder` holding the host's UNC view of the WSL
+path (`\\wsl.localhost\Ubuntu\home\you\repo`), which no POSIX repo root can
+equal.
+
+Nothing repairs it later. Compose-based dev containers are reused by Compose's
+own project name, so `devcontainer up` keeps handing back the VS Code-created
+container while discovery stays blind to it: `stop` reported "no running dev
+container" for a container running in front of the user, and the ambiguity check
+in the pane path was silently checking an empty set. Observed on four
+long-running repos whose containers were created by VS Code days earlier.
+
+Discovery now also queries `devcontainer.config_file`, which the CLI resolves
+from inside WSL and which therefore holds a POSIX path on those same containers.
+Both keys stay exact-match — reconstructing the UNC form from `WSL_DISTRO_NAME`
+was rejected as guessing at the host's path rendering (share prefix, distro
+name, and escaping all have to be right, and nothing validates the guess).
+Docker ANDs repeated `--filter label` arguments, so this is a second `docker ps`
+whose results are unioned and collapsed by container id — without the dedupe, a
+CLI-created container matching both keys would look like two running containers
+and trip the refuse-to-choose error.
