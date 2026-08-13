@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use herdr_devcontainer::{detect, discover, exec, preflight, shell, up};
+use herdr_devcontainer::{compose, detect, discover, exec, preflight, shell, stop, up};
 
 fn sh_ok(dir: &Path, cmd: &str, args: &[&str]) {
     let status = Command::new(cmd)
@@ -65,6 +65,111 @@ fn fixture_repo(tmp: &Path) -> std::path::PathBuf {
 /// equal, while `config_file` holds the POSIX path the CLI resolved inside WSL.
 /// Discovery keyed only on `local_folder` reports "no container" for a
 /// container that is running in front of the user — the reported regression.
+/// Stopping a compose-based dev container takes its whole project down.
+///
+/// The app service is only one container of several; leaving the database and
+/// cache running is not what "stop the dev container" means, and it is what the
+/// Dev Container spec's default `shutdownAction: stopCompose` says too.
+#[test]
+#[ignore = "requires docker"]
+fn stopping_a_compose_dev_container_stops_its_whole_project() {
+    preflight::check_docker("docker").expect("docker daemon");
+
+    let project = "herdrdevc_stopset_fixture";
+    struct Down(&'static str);
+    impl Drop for Down {
+        fn drop(&mut self) {
+            let Ok(out) = Command::new("docker")
+                .args([
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    &format!("label=com.docker.compose.project={}", self.0),
+                ])
+                .output()
+            else {
+                return;
+            };
+            for id in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                let _ = Command::new("docker").args(["rm", "-f", id]).status();
+            }
+        }
+    }
+    let _cleanup = Down(project);
+
+    // Built with plain `docker run` rather than the compose CLI: the labels are
+    // what the plugin reads, and this keeps the test to the one dependency the
+    // plugin itself requires.
+    let run_member = |service: &str| -> String {
+        let out = Command::new("docker")
+            .args(["run", "-d", "--label"])
+            .arg(format!("com.docker.compose.project={project}"))
+            .arg("--label")
+            .arg(format!("com.docker.compose.service={service}"))
+            .args(["--name", &format!("{project}-{service}-1")])
+            .args(["alpine:3.20", "sleep", "300"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "docker run {service} failed");
+        String::from_utf8_lossy(&out.stdout).trim()[..12].to_string()
+    };
+    let app = run_member("app");
+    let db = run_member("db");
+
+    let targets = compose::stop_set(&app, &format!("{project}-app-1")).expect("stop set");
+    assert_eq!(targets.len(), 2, "both services belong to the stop set");
+    assert_eq!(
+        targets[0].id, app,
+        "the dev container stops before its dependencies"
+    );
+
+    let ids: Vec<String> = targets.iter().map(|m| m.id.clone()).collect();
+    let out = Command::new("docker")
+        .args(&stop::stop_argv(&ids)[1..])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "docker stop failed");
+
+    for id in [&app, &db] {
+        let out = Command::new("docker")
+            .args(["inspect", "-f", "{{.State.Running}}", id])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "false",
+            "{id} is still running"
+        );
+    }
+}
+
+/// A container outside any compose project stops alone — the single-container
+/// path must be untouched by compose support.
+#[test]
+#[ignore = "requires docker"]
+fn a_standalone_dev_container_stops_by_itself() {
+    preflight::check_docker("docker").expect("docker daemon");
+
+    let out = Command::new("docker")
+        .args(["run", "-d", "--rm", "alpine:3.20", "sleep", "300"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let id = String::from_utf8_lossy(&out.stdout).trim()[..12].to_string();
+    struct Rm(String);
+    impl Drop for Rm {
+        fn drop(&mut self) {
+            let _ = Command::new("docker").args(["rm", "-f", &self.0]).status();
+        }
+    }
+    let _cleanup = Rm(id.clone());
+
+    let targets = compose::stop_set(&id, "solo").expect("stop set");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, id);
+    assert_eq!(targets[0].name, "solo");
+}
+
 #[test]
 #[ignore = "requires docker"]
 fn a_container_labelled_by_vs_code_on_windows_is_still_found() {

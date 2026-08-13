@@ -29,6 +29,8 @@ pub enum Error {
     MalformedDockerOutput { line: String },
     #[error("multiple running dev containers for {repo_root}; refusing to choose: {ids:?}")]
     MultipleRunningContainers { repo_root: String, ids: Vec<String> },
+    #[error("these containers did not stop: {ids:?}\n{detail}")]
+    ContainersNotStopped { ids: Vec<String>, detail: String },
     #[error("docker command failed: {detail}")]
     DockerCommandFailed { detail: String },
     #[error("{0}")]
@@ -60,6 +62,9 @@ impl Error {
             }
             Error::MultipleRunningContainers { .. } => {
                 Some("stop the extras with `docker stop <id>` and retry")
+            }
+            Error::ContainersNotStopped { .. } => {
+                Some("the rest of the project stopped; stop these with `docker stop <id>`")
             }
             _ => None,
         }
