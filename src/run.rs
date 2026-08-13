@@ -14,6 +14,10 @@ pub enum StderrMode {
 pub struct RunResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
+    /// Reading stdout ended on an error rather than EOF, so `stdout` may be a
+    /// prefix of what the process wrote. Callers that parse it for an answer
+    /// must not treat a short result as a complete one.
+    pub stdout_incomplete: bool,
     pub stderr: String,
     pub timed_out: bool,
 }
@@ -54,13 +58,18 @@ pub fn run(
         std::thread::sleep(Duration::from_millis(100));
     };
 
-    let stdout = stdout_thread.join().unwrap_or_default();
+    let stdout = stdout_thread.join().unwrap_or_else(|_| Capture {
+        text: String::new(),
+        // A panicked capture thread is not an empty stream.
+        incomplete: true,
+    });
     let stderr = stderr_thread
-        .map(|t| t.join().unwrap_or_default())
+        .map(|t| t.join().map(|c| c.text).unwrap_or_else(|_| String::new()))
         .unwrap_or_default();
     Ok(RunResult {
         exit_code: status.and_then(|s| s.code()),
-        stdout,
+        stdout: stdout.text,
+        stdout_incomplete: stdout.incomplete,
         stderr,
         timed_out,
     })
@@ -71,14 +80,31 @@ fn kill_group(child: &Child) {
     let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
 }
 
-fn capture_thread<R: Read + Send + 'static>(stream: Option<R>) -> std::thread::JoinHandle<String> {
+/// A captured stream, plus whether reading it ended early.
+///
+/// `incomplete` exists because a read error and a clean EOF used to look
+/// identical: both just stopped the loop. A caller that parses the result then
+/// treats a truncated stream as the whole answer.
+pub struct Capture {
+    pub text: String,
+    pub incomplete: bool,
+}
+
+fn capture_thread<R: Read + Send + 'static>(stream: Option<R>) -> std::thread::JoinHandle<Capture> {
     std::thread::spawn(move || {
         let mut out = Vec::new();
+        let mut incomplete = false;
         if let Some(mut stream) = stream {
             let mut buf = [0u8; 8192];
             loop {
                 match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    // A signal arriving mid-read says nothing about the stream.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        incomplete = true;
+                        break;
+                    }
                     Ok(n) => {
                         if out.len() < CAPTURE_LIMIT {
                             let take = n.min(CAPTURE_LIMIT - out.len());
@@ -88,7 +114,10 @@ fn capture_thread<R: Read + Send + 'static>(stream: Option<R>) -> std::thread::J
                 }
             }
         }
-        String::from_utf8_lossy(&out).into_owned()
+        Capture {
+            text: String::from_utf8_lossy(&out).into_owned(),
+            incomplete,
+        }
     })
 }
 
@@ -99,6 +128,54 @@ mod tests {
 
     fn sh(script: &str) -> Vec<String> {
         vec!["sh".into(), "-c".into(), script.into()]
+    }
+
+    // A read error was indistinguishable from EOF, so a truncated stream became
+    // a short-but-complete-looking capture. If truncation lands on a line
+    // boundary, `docker ps` output parses cleanly and a caller reads the short
+    // list as authoritative — "no running dev container" for a container that
+    // is running. The capture must say it was cut off.
+    #[test]
+    fn a_read_error_marks_the_capture_incomplete() {
+        struct FailsAfterFirstRead(bool);
+        impl Read for FailsAfterFirstRead {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 {
+                    return Err(std::io::Error::other("device went away"));
+                }
+                self.0 = true;
+                buf[..4].copy_from_slice(b"abc\n");
+                Ok(4)
+            }
+        }
+        let cap = capture_thread(Some(FailsAfterFirstRead(false)))
+            .join()
+            .unwrap();
+        assert_eq!(cap.text, "abc\n");
+        assert!(cap.incomplete, "a read error is not an EOF");
+    }
+
+    // EINTR is not a failure — a signal arriving mid-read says nothing about
+    // the stream. Treating it as one would make every capture a coin flip.
+    #[test]
+    fn an_interrupted_read_is_retried_not_reported() {
+        struct InterruptsOnce(u8);
+        impl Read for InterruptsOnce {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.0 += 1;
+                match self.0 {
+                    1 => Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                    2 => {
+                        buf[..2].copy_from_slice(b"ok");
+                        Ok(2)
+                    }
+                    _ => Ok(0),
+                }
+            }
+        }
+        let cap = capture_thread(Some(InterruptsOnce(0))).join().unwrap();
+        assert_eq!(cap.text, "ok");
+        assert!(!cap.incomplete);
     }
 
     #[test]

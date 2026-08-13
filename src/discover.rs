@@ -124,6 +124,10 @@ const PS_TIMEOUT_SECS: u64 = 5;
 /// exit code is `None` and the generic branch below would otherwise render it
 /// as a bare "docker command failed" with an empty detail. `shell::probe`
 /// distinguishes the two the same way.
+///
+/// A truncated capture is an error even at exit 0. Truncation on a line
+/// boundary parses cleanly, so the short list would otherwise be indexed as the
+/// complete set of containers — absence manufactured from a read failure.
 fn check_ps_result(res: &crate::run::RunResult) -> Result<(), Error> {
     if res.timed_out {
         return Err(Error::DockerCommandFailed {
@@ -133,6 +137,12 @@ fn check_ps_result(res: &crate::run::RunResult) -> Result<(), Error> {
     if res.exit_code != Some(0) {
         return Err(Error::DockerCommandFailed {
             detail: tail(res.stderr.trim(), 500),
+        });
+    }
+    if res.stdout_incomplete {
+        return Err(Error::DockerCommandFailed {
+            detail: "docker ps output was incomplete (its stdout could not be read to the end)"
+                .to_string(),
         });
     }
     Ok(())
@@ -185,6 +195,22 @@ mod tests {
         }
     }
 
+    // A truncated listing that happens to break on a line boundary parses
+    // perfectly and is simply short — the container we wanted may be in the
+    // part we never read. Exit code 0 does not make it complete.
+    #[test]
+    fn a_truncated_listing_is_an_error_not_a_shorter_answer() {
+        let res = crate::run::RunResult {
+            exit_code: Some(0),
+            stdout: "abc123\tfoo\trunning\n".to_string(),
+            stdout_incomplete: true,
+            stderr: String::new(),
+            timed_out: false,
+        };
+        let err = check_ps_result(&res).unwrap_err();
+        assert!(err.to_string().contains("incomplete"), "{err}");
+    }
+
     // A killed process reports no exit code, so the generic branch renders a
     // timeout as "docker command failed" with an empty detail — nothing the
     // user can act on. This path now runs up to three times per invocation, so
@@ -194,6 +220,7 @@ mod tests {
         let res = crate::run::RunResult {
             exit_code: None,
             stdout: String::new(),
+            stdout_incomplete: false,
             stderr: String::new(),
             timed_out: true,
         };
@@ -208,6 +235,7 @@ mod tests {
         let res = crate::run::RunResult {
             exit_code: Some(1),
             stdout: String::new(),
+            stdout_incomplete: false,
             stderr: "permission denied while trying to connect".to_string(),
             timed_out: false,
         };
