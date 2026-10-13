@@ -6,6 +6,8 @@ use crate::error::Error;
 pub const DEFAULT_COMMAND: &str = "claude";
 pub const DEFAULT_UP_TIMEOUT_SECS: u64 = 300;
 
+const RESERVED_UP_FLAGS: &[&str] = &["--workspace-folder", "--config", "--id-label"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Enabled {
     Auto,
@@ -24,6 +26,7 @@ pub struct RepoConfig {
     /// devcontainer.json's `remoteEnv`, which a plain `docker exec` does not
     /// apply and which this plugin deliberately does not parse.
     pub env: Vec<String>,
+    pub up_args: Vec<String>,
 }
 
 impl Default for RepoConfig {
@@ -33,6 +36,7 @@ impl Default for RepoConfig {
             config: None,
             shell: None,
             env: Vec::new(),
+            up_args: Vec::new(),
         }
     }
 }
@@ -41,6 +45,7 @@ impl Default for RepoConfig {
 pub struct Config {
     pub command: String,
     pub up_timeout_secs: u64,
+    pub up_args: Vec<String>,
     pub warnings: Vec<String>,
     repos: BTreeMap<PathBuf, RepoConfig>,
 }
@@ -50,6 +55,7 @@ impl Config {
         Config {
             command: DEFAULT_COMMAND.to_string(),
             up_timeout_secs: DEFAULT_UP_TIMEOUT_SECS,
+            up_args: Vec::new(),
             warnings: Vec::new(),
             repos: BTreeMap::new(),
         }
@@ -67,6 +73,10 @@ impl Config {
             }
         }
         RepoConfig::default()
+    }
+
+    pub fn up_args(&self, rc: &RepoConfig) -> Vec<String> {
+        self.up_args.iter().chain(&rc.up_args).cloned().collect()
     }
 }
 
@@ -158,6 +168,11 @@ pub fn parse(text: &str) -> Config {
                     .warnings
                     .push("`up_timeout_secs` must be a positive integer".into()),
             },
+            "up_args" => {
+                if let Some(args) = parse_up_args("`up_args`", &value, &mut cfg) {
+                    cfg.up_args = args;
+                }
+            }
             "repos" => parse_repos(value, &mut cfg),
             other => cfg
                 .warnings
@@ -202,6 +217,13 @@ fn parse_repos(value: toml::Value, cfg: &mut Config) {
                         .push(format!("repos.\"{root}\".shell must be a non-empty string")),
                 },
                 "env" => parse_repo_env(root, val, &mut rc, cfg),
+                "up_args" => {
+                    if let Some(args) =
+                        parse_up_args(&format!("repos.\"{root}\".up_args"), val, cfg)
+                    {
+                        rc.up_args = args;
+                    }
+                }
                 other => cfg
                     .warnings
                     .push(format!("unknown key repos.\"{root}\".{other} ignored")),
@@ -209,6 +231,41 @@ fn parse_repos(value: toml::Value, cfg: &mut Config) {
         }
         cfg.repos.insert(PathBuf::from(root), rc);
     }
+}
+
+fn parse_up_args(label: &str, value: &toml::Value, cfg: &mut Config) -> Option<Vec<String>> {
+    let invalid = |cfg: &mut Config| {
+        cfg.warnings.push(format!(
+            "{label} ignored; expected an array of non-empty strings"
+        ));
+        None
+    };
+    let Some(items) = value.as_array() else {
+        return invalid(cfg);
+    };
+    let mut args = Vec::with_capacity(items.len());
+    for item in items {
+        match item.as_str() {
+            Some(s) if !s.is_empty() => args.push(s.to_string()),
+            _ => return invalid(cfg),
+        }
+    }
+    if let Some(flag) = args.iter().find_map(|a| reserved_up_flag(a)) {
+        cfg.warnings.push(format!(
+            "{label} ignored; `{flag}` is managed by herdr-devcontainer"
+        ));
+        return None;
+    }
+    Some(args)
+}
+
+fn reserved_up_flag(arg: &str) -> Option<&'static str> {
+    RESERVED_UP_FLAGS.iter().copied().find(|flag| {
+        arg == *flag
+            || arg
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.starts_with('='))
+    })
 }
 
 /// `env` entries reach `docker exec -e` verbatim, so a malformed one is
@@ -320,6 +377,54 @@ mod tests {
         let cfg = parse("[repos.\"/x/repo\"]\nenv = \"FOO=bar\"\n");
         assert!(cfg.repo(Path::new("/x/repo")).env.is_empty());
         assert_eq!(cfg.warnings.len(), 1);
+    }
+
+    #[test]
+    fn up_args_parse_globally_and_per_repo() {
+        let cfg = parse(
+            r#"
+            up_args = ["--build-no-cache"]
+
+            [repos."/x/repo"]
+            up_args = ["--mount", "type=bind,source=/a,target=/b"]
+            "#,
+        );
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        let rc = cfg.repo(Path::new("/x/repo"));
+        assert_eq!(
+            cfg.up_args(&rc),
+            vec![
+                "--build-no-cache".to_string(),
+                "--mount".to_string(),
+                "type=bind,source=/a,target=/b".to_string(),
+            ]
+        );
+        let other = cfg.repo(Path::new("/elsewhere"));
+        assert_eq!(cfg.up_args(&other), vec!["--build-no-cache".to_string()]);
+    }
+
+    #[test]
+    fn up_args_with_a_bad_entry_are_dropped_whole() {
+        let cfg = parse("up_args = [\"--mount\", 1]\n");
+        assert!(cfg.up_args.is_empty());
+        assert_eq!(cfg.warnings.len(), 1);
+
+        let cfg = parse("up_args = \"--build-no-cache\"\n");
+        assert!(cfg.up_args.is_empty());
+        assert_eq!(cfg.warnings.len(), 1);
+    }
+
+    #[test]
+    fn up_args_naming_a_reserved_flag_are_dropped_whole() {
+        for arg in ["--workspace-folder", "--config=/x.json", "--id-label"] {
+            let cfg = parse(&format!(
+                "[repos.\"/x/repo\"]\nup_args = [\"--build-no-cache\", \"{arg}\"]\n"
+            ));
+            assert!(cfg.repo(Path::new("/x/repo")).up_args.is_empty(), "{arg}");
+            assert_eq!(cfg.warnings.len(), 1, "{arg}");
+        }
+        let cfg = parse("up_args = [\"--configuration\"]\n");
+        assert!(cfg.warnings.is_empty());
     }
 
     #[test]
