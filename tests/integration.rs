@@ -286,8 +286,14 @@ fn bring_up_exec_and_stop_roundtrip() {
     let repo = fixture_repo(tmp.path());
     let _cleanup = StopFixtureContainer { repo: repo.clone() };
 
-    let result = up::bring_up(&devcontainer_bin, &repo, None, Duration::from_secs(300))
-        .expect("devcontainer up");
+    let result = up::bring_up(
+        &devcontainer_bin,
+        &repo,
+        None,
+        &[],
+        Duration::from_secs(300),
+    )
+    .expect("devcontainer up");
     assert!(!result.container_id.is_empty());
     assert!(result.remote_workspace_folder.starts_with('/'));
 

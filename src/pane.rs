@@ -39,6 +39,7 @@ pub fn run_pane(shell: bool) -> Result<(), Error> {
             &devcontainer_bin,
             &repo_root,
             detection.config_arg.as_deref(),
+            &cfg.up_args(&repo_cfg),
             Duration::from_secs(cfg.up_timeout_secs),
         )?
     };

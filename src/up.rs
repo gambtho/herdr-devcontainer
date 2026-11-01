@@ -23,6 +23,7 @@ pub fn up_argv(
     devcontainer_bin: &Path,
     repo_root: &Path,
     config_arg: Option<&Path>,
+    extra_args: &[String],
 ) -> Vec<String> {
     let mut argv = vec![
         devcontainer_bin.display().to_string(),
@@ -34,6 +35,7 @@ pub fn up_argv(
         argv.push("--config".to_string());
         argv.push(cfg.display().to_string());
     }
+    argv.extend(extra_args.iter().cloned());
     argv
 }
 
@@ -70,10 +72,11 @@ pub fn bring_up(
     devcontainer_bin: &Path,
     repo_root: &Path,
     config_arg: Option<&Path>,
+    extra_args: &[String],
     timeout: Duration,
 ) -> Result<UpResult, Error> {
     eprintln!("bringing up dev container for {} ...", repo_root.display());
-    let argv = up_argv(devcontainer_bin, repo_root, config_arg);
+    let argv = up_argv(devcontainer_bin, repo_root, config_arg, extra_args);
     let res = run(&argv, timeout, StderrMode::Inherit)?;
     if res.timed_out {
         return Err(Error::UpTimeout {
@@ -99,7 +102,12 @@ mod tests {
 
     #[test]
     fn argv_without_custom_config() {
-        let argv = up_argv(Path::new("/usr/bin/devcontainer"), Path::new("/r"), None);
+        let argv = up_argv(
+            Path::new("/usr/bin/devcontainer"),
+            Path::new("/r"),
+            None,
+            &[],
+        );
         assert_eq!(
             argv,
             vec!["/usr/bin/devcontainer", "up", "--workspace-folder", "/r"]
@@ -112,10 +120,35 @@ mod tests {
             Path::new("devcontainer"),
             Path::new("/r"),
             Some(Path::new("/r/alt.json")),
+            &[],
         );
         assert_eq!(
             argv[4..],
             ["--config".to_string(), "/r/alt.json".to_string()]
+        );
+    }
+
+    #[test]
+    fn argv_appends_extra_args_last() {
+        let argv = up_argv(
+            Path::new("devcontainer"),
+            Path::new("/r"),
+            Some(Path::new("/r/alt.json")),
+            &[
+                "--build-no-cache".to_string(),
+                "--log-level".to_string(),
+                "debug".to_string(),
+            ],
+        );
+        assert_eq!(
+            argv[4..],
+            [
+                "--config",
+                "/r/alt.json",
+                "--build-no-cache",
+                "--log-level",
+                "debug"
+            ]
         );
     }
 

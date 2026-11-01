@@ -194,27 +194,39 @@ command = "claude"
 # Ceiling for `devcontainer up`, in seconds.
 up_timeout_secs = 300
 
+# Extra arguments appended to every `devcontainer up`.
+up_args = ["--log-level", "debug"]
+
 [repos."/home/you/workspace/foo"]
 enabled = "auto"                                 # "auto" (default) | "true" | "false"
 config = ".devcontainer/alt/devcontainer.json"   # repo-relative
 shell = "/bin/zsh"                               # default: the container user's login shell
 env = ["ANTHROPIC_BASE_URL=http://proxy:8080"]   # passed as `docker exec -e`
+up_args = ["--mount", "type=bind,source=/data,target=/data"]   # appended after the global ones
 ```
 
 | Setting | Meaning |
 |---|---|
 | `command` | Payload for the `command` pane; default `claude` |
 | `up_timeout_secs` | Bring-up timeout in seconds; default `300` |
+| `up_args` (global) | Extra arguments appended to `devcontainer up` for every repository |
 | `enabled = "auto"` | Require a Dev Container config at a standard or explicitly configured path |
 | `enabled = "true"` | Skip detection entirely and let `devcontainer up` decide what is valid |
 | `enabled = "false"` | Refuse to open container panes for that repository |
 | `config` | Alternate repo-relative `devcontainer.json` path |
 | `shell` | Shell to exec into, overriding the one probed from the container |
 | `env` | `KEY=value` assignments passed to `docker exec -e` |
+| `up_args` (per repo) | Extra arguments appended to `devcontainer up` after the global `up_args` |
 
 An `env` entry that is not `KEY=value` is dropped with a warning rather than
 forwarded: `docker exec -e NAME` with no `=` exports the *host's* variable of
 that name into the container, which is never what the setting asked for.
+
+`up_args` is an array of separate arguments, not a shell string: write `["--log-level", "debug"]`, not `["--log-level debug"]`.
+Each entry is passed as-is, with no shell expansion.
+An `up_args` list that contains a non-string, an empty string, or one of `--workspace-folder`, `--config`, or `--id-label` is ignored as a whole with a warning.
+The reserved flags' camelCase aliases (`--workspaceFolder`, `--idLabel`) and `--flag=value` forms are rejected too.
+The plugin sets the first two itself, and `--id-label` would replace the labels it uses to find and stop the container.
 
 Under `auto`, detection checks, in order:
 
