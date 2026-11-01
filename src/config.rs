@@ -260,12 +260,14 @@ fn parse_up_args(label: &str, value: &toml::Value, cfg: &mut Config) -> Option<V
 }
 
 fn reserved_up_flag(arg: &str) -> Option<&'static str> {
-    RESERVED_UP_FLAGS.iter().copied().find(|flag| {
-        arg == *flag
-            || arg
-                .strip_prefix(flag)
-                .is_some_and(|rest| rest.starts_with('='))
-    })
+    let name = arg.split_once('=').map_or(arg, |(name, _)| name);
+    // The CLI's yargs parser accepts camelCase aliases for dashed options.
+    let name = match name {
+        "--workspaceFolder" => "--workspace-folder",
+        "--idLabel" => "--id-label",
+        name => name,
+    };
+    RESERVED_UP_FLAGS.iter().copied().find(|flag| name == *flag)
 }
 
 /// `env` entries reach `docker exec -e` verbatim, so a malformed one is
@@ -416,15 +418,41 @@ mod tests {
 
     #[test]
     fn up_args_naming_a_reserved_flag_are_dropped_whole() {
-        for arg in ["--workspace-folder", "--config=/x.json", "--id-label"] {
-            let cfg = parse(&format!(
-                "[repos.\"/x/repo\"]\nup_args = [\"--build-no-cache\", \"{arg}\"]\n"
-            ));
-            assert!(cfg.repo(Path::new("/x/repo")).up_args.is_empty(), "{arg}");
-            assert_eq!(cfg.warnings.len(), 1, "{arg}");
+        for flag in [
+            "--workspace-folder",
+            "--workspaceFolder",
+            "--config",
+            "--id-label",
+            "--idLabel",
+        ] {
+            for suffix in ["", "=/x"] {
+                let arg = format!("{flag}{suffix}");
+                for scope in ["", "[repos.\"/x/repo\"]\n"] {
+                    let cfg = parse(&format!(
+                        "{scope}up_args = [\"--build-no-cache\", \"{arg}\"]\n"
+                    ));
+                    let rc = cfg.repo(Path::new("/x/repo"));
+                    assert!(cfg.up_args(&rc).is_empty(), "{scope}{arg}");
+                    assert_eq!(cfg.warnings.len(), 1, "{scope}{arg}");
+                }
+            }
         }
-        let cfg = parse("up_args = [\"--configuration\"]\n");
+    }
+
+    #[test]
+    fn up_args_with_similar_flag_names_are_preserved() {
+        let cfg = parse(
+            "up_args = [\"--configuration\", \"--workspaceFolderExtra=/x\", \"--idLabelExtra=x=y\"]\n",
+        );
         assert!(cfg.warnings.is_empty());
+        assert_eq!(
+            cfg.up_args,
+            [
+                "--configuration",
+                "--workspaceFolderExtra=/x",
+                "--idLabelExtra=x=y"
+            ]
+        );
     }
 
     #[test]

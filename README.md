@@ -225,6 +225,7 @@ that name into the container, which is never what the setting asked for.
 `up_args` is an array of separate arguments, not a shell string: write `["--log-level", "debug"]`, not `["--log-level debug"]`.
 Each entry is passed as-is, with no shell expansion.
 An `up_args` list that contains a non-string, an empty string, or one of `--workspace-folder`, `--config`, or `--id-label` is ignored as a whole with a warning.
+The reserved flags' camelCase aliases (`--workspaceFolder`, `--idLabel`) and `--flag=value` forms are rejected too.
 The plugin sets the first two itself, and `--id-label` would replace the labels it uses to find and stop the container.
 
 Under `auto`, detection checks, in order:
