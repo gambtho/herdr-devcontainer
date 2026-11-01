@@ -62,7 +62,7 @@ cannot drift away from what actually compiles.
 Install the latest reviewed release:
 
 ```sh
-herdr plugin install gambtho/herdr-devcontainer --ref v0.2.0
+herdr plugin install gambtho/herdr-devcontainer --ref v0.2.1
 ```
 
 Herdr clones the tagged source and runs the manifest's `cargo build --release`
@@ -394,12 +394,12 @@ installing the plugin into a real Herdr and exercising all three entrypoints.
 ## Status
 
 The current release is
-[`v0.2.0`](https://github.com/gambtho/herdr-devcontainer/releases/tag/v0.2.0),
+[`v0.2.1`](https://github.com/gambtho/herdr-devcontainer/releases/tag/v0.2.1),
 matching the version in both `Cargo.toml` and the plugin manifest. Pin to it
 with `--ref` to install a reviewed revision:
 
 ```sh
-herdr plugin install gambtho/herdr-devcontainer --ref v0.2.0
+herdr plugin install gambtho/herdr-devcontainer --ref v0.2.1
 ```
 
 An install without `--ref` follows the current default branch instead.
